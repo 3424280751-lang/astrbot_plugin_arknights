@@ -1,0 +1,579 @@
+> **个人维护的 0.4.6 改版**：基于 [Siq5005/astrbot_plugin_arknights](https://github.com/Siq5005/astrbot_plugin_arknights)，保留原作者署名和 MIT 许可证。新增各肉鸽主题的累计节点、通关次数、最高通关难度，以及接口提供的分结局最高难度。旧主题缺失的字段显示“未提供”，不根据近期记录推算累计最高值。
+
+<div align="center">
+
+<img src="logo.png" alt="罗德岛终端" width="150" />
+
+# 🌌 astrbot_plugin_arknights
+
+### *罗德岛终端 · 明日方舟 AstrBot 插件*
+
+[![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-FFB400?style=for-the-badge&logo=python)](https://github.com/AstrBotDevs/AstrBot)
+[![Version](https://img.shields.io/badge/version-0.4.6-FFB400?style=for-the-badge)](#-更新日志)
+[![License](https://img.shields.io/badge/license-MIT-FFB400?style=for-the-badge)](LICENSE)
+
+### 🚀 基于森空岛官方接口的明日方舟查询工具
+
+### 扫码绑定 · 便签 · 理智 · 签到 · 干员图鉴 · 基建 · 剿灭 · 集成战略 · 任务 · 公招 · 抽卡分析 · 公告推送
+
+**不依赖任何第三方中转服务，直接对接鹰角 / 森空岛官方接口。**
+
+> **平台支持**：已在 `aiocqhttp`（OneBot v11）上验证。插件使用 AstrBot 通用消息 API，其它适配器的查询与订阅指令应当同样可用；唯一平台相关的是二维码自动撤回（走 OneBot 的 `delete_msg`），非 OneBot 平台会退化为普通回复、二维码不会自动撤回。
+
+如果这个插件对你有帮助，请点亮 ⭐ 支持一下！
+
+</div>
+
+---
+
+## 📑 目录
+
+- [✨ 特性一览](#-特性一览)
+- [🔧 安装与配置](#-安装与配置)
+- [📁 项目结构](#-项目结构)
+- [🎮 功能详解](#-功能详解)
+- [📸 功能预览](#-功能预览)
+- [🎨 自定义美化](#-自定义美化)
+- [📋 TODO](#-todo)
+- [📜 更新日志](#-更新日志)
+- [🙏 鸣谢](#-鸣谢)
+- [📄 许可](#-许可)
+- [❓ 常见问题](#-常见问题)
+
+---
+
+## ✨ 特性一览
+
+✅ **账号管理** - 森空岛 APP 扫码登录（唯一登录方式）、多角色绑定、主账号切换、解绑
+
+✅ **消息保护** - 二维码在超时、成功或被拒后自动撤回；任何回复都不回显账号凭证
+
+✅ **数据查询** - 便签、理智、干员图鉴、干员详情、基建、剿灭、集成战略、任务进度、公开招募
+
+✅ **抽卡分析** - 官方抽卡记录导入、**每个卡池独立统计**（含 UP 干员与开放时间）、六星序列与保底、UP / 歪判定、欧非评级
+
+✅ **自动签到** - 每日定时森空岛签到，支持随机延迟防风控
+
+✅ **订阅提醒** - 理智回满推送、群内签到结果通知、官方新公告推送
+
+✅ **官方公告** - 公告列表、按编号看正文、新公告订阅推送
+
+✅ **图像资源** - 干员立绘 / 头像、职业徽章、稀有度 / 精英化 / 潜能标记、基建设施图标、时装立绘
+
+✅ **卡片视觉** - 每张卡片独立配色主题（12 套）、干员瓦片按稀有度着色、蓝图网格与渐变底纹，全部由 CSS 生成，无位图素材
+
+✅ **指令隔离** - 所有指令以 `ark` 开头，与终末地插件（`~` 前缀）互不抢答；漏写唤醒前缀时给出提示
+
+✅ **群聊可用** - 绑定、查询、订阅全部支持群聊；订阅推送到发起指令的那个会话
+
+---
+
+## 🔧 安装与配置
+
+### 快速安装
+
+在 AstrBot 插件管理器中搜索 `astrbot_plugin_arknights` 安装，或通过 Git 克隆：
+
+```bash
+cd AstrBot/data/plugins
+git clone https://github.com/Siq5005/astrbot_plugin_arknights.git
+```
+
+### 环境依赖
+
+图片渲染依赖无头浏览器内核，**必须安装一次**：
+
+```bash
+playwright install chromium
+```
+
+其余依赖（`httpx`、`pycryptodome`、`qrcode`、`jinja2`、`apscheduler`）由 AstrBot 在装载插件时自动安装。
+
+### 配置项说明
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|:-------|:-----|:-------|:-----|
+| `render_timeout` | int | `30000` | 图片渲染超时时间（毫秒） |
+| `data_ttl` | int | `300` | 玩家数据缓存时间（秒），同一账号在该时间内复用缓存，避免频繁请求触发风控 |
+| `sign_time` | string | `00:05` | 每日自动签到时间，格式 `HH:MM` |
+| `sanity_poll_interval` | int | `20` | 理智订阅轮询间隔（分钟），下限 10 分钟 |
+| `announce_poll_interval` | int | `30` | 公告订阅轮询间隔（分钟），下限 15 分钟 |
+| `announce_push_cards` | int | `3` | 公告推送附带详情卡的数量；前 N 条渲染为卡片（含配图），其余只给标题，`0` 表示全部只发文字 |
+| `announce_max_age_hours` | int | `24` | 公告推送时间窗口（小时）。只推送发布时间在窗口内的公告 |
+| `feed_source` | string | `selfhosted` | 公告推送数据源。`selfhosted` = 自建森空岛「官方」栏目源（含 PV / EP 视频等官网没有的动态）；`official` = 官网公告源。自建源连续失败会自动降级到官网源 |
+| `feed_base_url` | string | `https://ark.youyou.ink/api/ark/v1` | 自建源地址，默认无需修改 |
+| `feed_api_key` | string | `（已内置）` | 自建源访问密钥。默认值随插件内置，无需修改 |
+| `feed_exclude_keywords` | string | `签到福利,周记表,每日谜题,猜猜我是谁,创作集锦,版区作品,模组,游戏工具,有奖活动,创作者应援,讨论楼,热议` | 公告推送排除关键词，英文逗号分隔；标题命中任一关键词的条目不推送。留空则不过滤 |
+| `feed_retry_delays` | string | `1,3,5` | 自建源失败后的重试间隔（分钟），英文逗号分隔。按这些间隔依次重试，全部失败才降级到官网源并告警；留空表示失败即降级 |
+| `gacha_cache_ttl` | int | `21600` | 抽卡记录缓存时间（秒）。该时间内直接用本地记录，不请求官网 |
+| `max_bindings` | int | `5` | 单用户最大绑定角色数，`0` 表示不限制 |
+
+---
+
+## 📁 项目结构
+
+```
+astrbot_plugin_arknights/
+├── main.py                 # 插件入口：指令路由、定时任务、消息收发
+├── metadata.yaml           # 插件元数据
+├── _conf_schema.json       # WebUI 配置 schema
+├── core/                   # 核心逻辑（不依赖 astrbot，可独立单测）
+│   ├── skland.py           # 森空岛：设备指纹、请求签名、OAuth、绑定、签到、玩家数据
+│   ├── hypergryph.py       # 鹰角登录：扫码、token 兑换
+│   ├── gacha.py            # 抽卡：四级凭证链、记录抓取、统计分析
+│   ├── gamedata.py         # 卡池元数据与 UP 名单（双源下载 + 缓存）
+│   ├── announce.py         # 官方公告抓取与正文提取
+│   ├── cards.py            # 便签 / 理智卡片数据
+│   ├── daily.py            # 基建 / 剿灭 / 肉鸽 / 任务 / 公招卡片数据
+│   ├── operators.py        # 干员分组、查找与详情
+│   ├── assets.py           # 图像资源 URL 组装
+│   ├── render.py           # Playwright + Jinja2 渲染器
+│   └── store.py            # 绑定与订阅持久化（原子写 + 0600）
+├── templates/              # 卡片模板（Jinja2 + CSS）
+├── tests/                  # 单元测试与集成检查
+└── docs/                   # 设计文档与实施计划
+```
+
+---
+
+## 🎮 功能详解
+
+> ⚠️ **所有指令都以 `ark` 开头。**
+> 这是刻意设计：[astrbot_plugin_endfield](https://github.com/Entropy-Increase-Team/astrbot_plugin_endfield)（终末地插件）注册了 `理智`、`便签`、`签到`、`扫码绑定`、`绑定列表` 等裸指令，还有一个匹配任意「xxx面板」的正则。如果本插件也用同名指令，同一条消息会被**两个插件同时处理**。加 `ark` 前缀后两者互不干扰，并且本插件会在用户漏写 `~` 唤醒前缀时主动提示正确写法。
+
+### 🔐 账号与绑定
+
+| 指令 | 说明 | 场景 |
+|:-----|:-----|:-----|
+| `ark绑定` | 使用森空岛 APP 扫码登录（唯一登录方式） | 全部 |
+| `ark绑定列表` | 查看所有绑定角色 | 全部 |
+| `ark切换绑定 <序号>` | 切换主账号 | 全部 |
+| `ark删除绑定 <序号>` | 解绑指定角色 | 全部 |
+
+> 💬 **群聊 / 私聊均可使用**：所有指令在群聊与私聊中都能用。群聊里发送 `ark绑定` 时，二维码消息会**额外附上凭证警告**——二维码等同于登录凭证，谁先扫码，TA 的森空岛账号就会绑定到发起指令的那个人名下。订阅类指令推送的目标就是**你发起指令的那个会话**。
+
+### 📊 数据查询
+
+| 指令 | 说明 | 场景 |
+|:-----|:-----|:-----|
+| `ark便签` | 账号总览：助理立绘、签名、等级、主线进度、干员 / 时装数、理智、任务进度 | 全部 |
+| `ark理智` | 理智与回满倒计时 | 全部 |
+| `ark干员列表` | 持有干员图鉴（按职业分组，含精英化与星级） | 全部 |
+| `ark干员 <干员名>` | 单干员详情（别名 `ark面板 <干员名>`） | 全部 |
+
+### 🎯 日常玩法
+
+| 指令 | 说明 | 场景 |
+|:-----|:-----|:-----|
+| `ark基建` | 发电站 / 制造站 / 贸易站 / 宿舍 / 控制中枢 / 会客室，含干员心情、无人机与线索 | 全部 |
+| `ark剿灭` | 剿灭作战进度与本周合成玉 | 全部 |
+| `ark肉鸽` | 集成战略收藏品与投资进度 | 全部 |
+| `ark任务` | 每日 / 每周任务与周常奖励 | 全部 |
+| `ark公招` | 公开招募栏位状态与倒计时 | 全部 |
+
+### 🎰 抽卡与签到
+
+> 💾 **抽卡记录本地持久化**：官网接口只返回最近一段记录，本插件会把每次同步到的记录**累积保存在本地**并按 `(卡池类别, 时间, 位置)` 去重合并，因此历史只会增长、不会因为官网窗口滚动而丢失。缓存期内查询直接读本地，不消耗接口；同步失败时也会退回本地记录而不是报错。
+
+
+| 指令 | 说明 | 场景 |
+|:-----|:-----|:-----|
+| `ark抽卡分析` | **每个卡池独立成段**：平均出六、平均 UP、总抽数、当前保底、六星序列、欧非评级，并标注该池 UP 六星与开放时间 | 全部 |
+| `ark抽卡记录` | 最近的抽卡记录列表 | 全部 |
+| `ark抽卡分析 同步`（或 `ark抽卡同步`） | 忽略缓存，强制重新同步官网记录 | 全部 |
+| `ark抽卡重置` | 清空该角色在本机保存的抽卡记录 | 全部 |
+| `ark签到` | 手动执行森空岛签到 | 全部 |
+| `ark订阅理智` / `ark取消订阅理智` | 理智回满时推送到**当前会话**；群聊里会 **@订阅者** 并写明是哪个角色 | 全部 |
+| `ark订阅签到` / `ark取消订阅签到` | 群内自动签到结果通知 | 群聊 |
+
+### 📢 官方公告
+
+| 指令 | 说明 | 场景 |
+|:-----|:-----|:-----|
+| `ark公告` | 公告列表（活动 / 系统分类、置顶标记） | 全部 |
+| `ark公告 <编号>` | 渲染指定公告的**详情卡片**（保留官方富文本排版与内嵌配图） | 全部 |
+| `ark订阅公告` / `ark取消订阅公告` | 有新公告时推送到**当前会话**，附公告详情卡（含官方配图） | 全部 |
+
+> 💡 发送 `ark帮助` 可查看图片版指令菜单。
+
+---
+
+## 📸 功能预览
+
+> 以下均为插件**实际渲染输出**，非设计稿；数据来自测试账号。
+>
+> 卡片原生宽度约 **900px**，这里按 **900px 显示**（1:1），因此文字大小与机器人发到群里的观感一致；
+> 图片文件本身是 **1800px**（2 倍 DPI 渲染结果），在高分屏上依然锐利，点击可查看原图。
+
+<details>
+<summary>点击展开全部 13 张预览图</summary>
+
+**`ark帮助`**
+
+<sub>指令总览</sub>
+
+<img src="https://raw.githubusercontent.com/Siq5005/astrbot_plugin_arknights/main/docs/preview/help.jpg" width="900">
+
+**`ark便签`**
+
+<sub>账号总览</sub>
+
+<img src="https://raw.githubusercontent.com/Siq5005/astrbot_plugin_arknights/main/docs/preview/note.jpg" width="900">
+
+**`ark理智`**
+
+<sub>理智与回满时间</sub>
+
+<img src="https://raw.githubusercontent.com/Siq5005/astrbot_plugin_arknights/main/docs/preview/sanity.jpg" width="900">
+
+**`ark干员 &lt;名称&gt;`**
+
+<sub>干员详情</sub>
+
+<img src="https://raw.githubusercontent.com/Siq5005/astrbot_plugin_arknights/main/docs/preview/operator.jpg" width="900">
+
+**`ark干员列表`**
+
+<sub>持有干员图鉴</sub>
+
+<img src="https://raw.githubusercontent.com/Siq5005/astrbot_plugin_arknights/main/docs/preview/operator-list.jpg" width="900">
+
+**`ark基建`**
+
+<sub>基建设施与干员心情</sub>
+
+<img src="https://raw.githubusercontent.com/Siq5005/astrbot_plugin_arknights/main/docs/preview/building.jpg" width="900">
+
+**`ark剿灭`**
+
+<sub>剿灭作战与本周合成玉</sub>
+
+<img src="https://raw.githubusercontent.com/Siq5005/astrbot_plugin_arknights/main/docs/preview/campaign.jpg" width="900">
+
+**`ark肉鸽`**
+
+<sub>集成战略收藏品与投资</sub>
+
+<img src="https://raw.githubusercontent.com/Siq5005/astrbot_plugin_arknights/main/docs/preview/rogue.jpg" width="900">
+
+**`ark任务`**
+
+<sub>每日 / 每周任务</sub>
+
+<img src="https://raw.githubusercontent.com/Siq5005/astrbot_plugin_arknights/main/docs/preview/task.jpg" width="900">
+
+**`ark公招`**
+
+<sub>公开招募栏位</sub>
+
+<img src="https://raw.githubusercontent.com/Siq5005/astrbot_plugin_arknights/main/docs/preview/recruit.jpg" width="900">
+
+**`ark抽卡分析`**
+
+<sub>六星统计、保底与 UP 判定</sub>
+
+<img src="https://raw.githubusercontent.com/Siq5005/astrbot_plugin_arknights/main/docs/preview/gacha.jpg" width="900">
+
+**`ark公告`**
+
+<sub>官方公告列表</sub>
+
+<img src="https://raw.githubusercontent.com/Siq5005/astrbot_plugin_arknights/main/docs/preview/announce.jpg" width="900">
+
+**`ark公告 &lt;编号&gt;`**
+
+<sub>公告详情（保留官方排版与配图）</sub>
+
+<img src="https://raw.githubusercontent.com/Siq5005/astrbot_plugin_arknights/main/docs/preview/announce-detail.jpg" width="900">
+
+</details>
+
+> 预览图由 `tests/render_preview.py` 一键重新生成：它会用固定测试数据渲染全部 13 张卡片，
+> 并把渲染器输出（原生 1800px）直接复制到 `docs/preview/`，**不做任何缩放**——
+> 因此预览与机器人实际发送给用户的图片完全一致。UI 设计稿见 `docs/preview/ui-design.png`。
+
+---
+
+## 🎨 自定义美化
+
+卡片模板位于插件目录的 `templates/`，直接用 HTML + CSS 编写，可以自由替换配色与版式：
+
+| 文件 | 对应卡片 |
+|:-----|:---------|
+| `templates/base.css` | 全局配色、卡片主题与组件样式（`--theme` 控制每张卡的主色） |
+| `templates/note.html` | 便签 |
+| `templates/sanity.html` | 理智 |
+| `templates/operator_list.html` / `operator.html` | 干员图鉴 / 干员详情 |
+| `templates/building.html` | 基建 |
+| `templates/campaign.html` / `rogue.html` / `task.html` / `recruit.html` | 剿灭 / 集成战略 / 任务 / 公招 |
+| `templates/gacha.html` | 抽卡分析 |
+| `templates/announce.html` | 官方公告 |
+| `templates/help.html` | 帮助菜单 |
+
+想换某张卡的配色，改它主题块里的 `--theme` / `--theme-2` 即可；想改全局默认色，改 `:root` 里的同名变量。
+
+### 卡片主题与背景装饰
+
+每张卡片有**独立配色主题**，主题类由渲染器**按模板名自动注入**（见 `core/render.py` 的 `CARD_THEMES`），
+新增卡片只需在模板里写 `class="card {{ card_class }}"`。
+
+| 变量 | 作用 |
+|:---|:---|
+| `--theme` | 该卡主色；`.card` 内的 `--accent` 即取此值 |
+| `--theme-2` | 辅助色，用于顶部色条与分区标题渐变 |
+| `--theme-soft` | 主色的低透明度版本，用于底纹斜切块 |
+
+现有 **12 套主题**：`t-help`、`t-profile`、`t-sanity`、`t-operator`、`t-roster`、`t-gacha`、
+`t-announce`、`t-building`、`t-task`、`t-campaign`、`t-rogue`、`t-recruit`。
+
+卡片背景全部由 CSS 渐变叠加，**没有任何位图素材**（仓库零增重、任意 DPI 都锐利、长卡片不会出现平铺接缝）：
+
+| 层 | 内容 |
+|:---|:---|
+| 1 | 主题色斜切块（128°） |
+| 2 / 3 | 48px 蓝图网格 |
+| 4 | 左上柔光 |
+| 5 | 底色渐变 `#151824 → #0b0d14` |
+
+结构性装饰共三处：`.card::before` 是顶部 4px 主题双色条，`.card::after` 是右上角旋转的装饰框
+（主题色危险条纹），每个 `.panel` 顶部还有一条 2px 主题渐变。
+
+干员瓦片按**稀有度**着色——渲染时给瓦片加 `rarity-{星级}` 类（`rarity-4` / `rarity-5` / `rarity-6`）。
+
+---
+
+## 📋 TODO
+
+- [x] 账号绑定（扫码）、便签、理智、签到
+- [x] 干员图鉴与干员详情
+- [x] 基建、剿灭、集成战略、任务、公开招募
+- [x] 抽卡记录导入与逐卡池分析（UP / 歪判定、保底、欧非评级）
+- [x] 官方公告列表、正文与订阅推送
+- [ ] 活动与别传进度（`activityInfoMap` + `activity` 已在手）
+- [ ] 时装图鉴（`skins` + `skinInfoMap` 已在手）
+- [ ] 干员技能名（需 `skill_table.json`）
+- [ ] 材料掉率查询（需企鹅物流 API）
+- [ ] 卡片装饰性背景素材
+- [ ] 公招词条组合推荐（**暂缓**：森空岛接口不返回词条，招募池成员缺少可靠结构化来源，未验证前不做，以免给出错误建议）
+
+---
+
+## 📜 更新日志
+
+<details>
+<summary>点击展开版本历史</summary>
+
+### 0.4.6 (2026-10-19)
+
+- ✨ **超长公告不再刷屏**：配图很多、整卡渲染不出来的公告（如「〓朝陇山 余量上架〓」9 张长图），现在只把**首图**放进卡片并注明总数与查看方式，一次推送从 7 条消息回到 1 条；整卡连首图都放不下时才退回转发原图
+- 🐛 **修复 `ark公告 <编号>` 查不到自建源公告**：命令原先无条件调用官网详情接口，而自建源的编号是森空岛文章 id（7 位），官网只认自己的 4 位 cid，必然 404。现在自建源记录直接用自身的正文与配图，且详情卡渲染不出时会把原图发给提问者
+- 🐛 **修复公告水位线提前推进导致漏推**：水位线（记录"已推送到哪"）原先会推进到**列表里最新的一条**，而不是**实际推送出去的最新一条**。于是被时间窗口、排除关键词或未来时间戳拦下的条目，会连同水位线一起被跨过去、永久不再推送。降级到官网源时，官网独有的公告就是这样丢掉的。现在只有真正推送成功的条目才会推进水位线，没有可推内容时水位线完全不动
+
+### 0.4.5 (2026-10-19)
+
+- 🐛 **修复超长公告卡片仍然发送失败**：0.4.4 把超高页面缩放后虽然不再产生空文件，但产物是 725×59896、6.9 MB 的细长条，QQ 依然拒收（`rich media transfer failed`）。现在超过 30000px 的页面不再合成卡片，改为**直接转发公告自带原图**（最多 6 张，其余用 `ark公告 <编号>` 查看）——既发得出去，也看得清
+
+### 0.4.4 (2026-10-19)
+
+- 🐛 **修复超高公告卡片发送失败**：正文很长、配图很多的公告（如「〓朝陇山 余量上架〓」，9 张长图）会让卡片高度达到 7 万像素，超过 Chromium 的截图上限，生成的是 0 字节文件，QQ 上传时报 `rich media transfer failed`，群里只收到「官方新公告」四个字。现在超过上限时按比例缩放渲染，并在截图后校验产物——万一仍是空文件就自动回退为文字，不再发出坏图
+
+### 0.4.3 (2026-10-14)
+
+- ✨ **新增根目录 `CHANGELOG.md`**（[#3](https://github.com/Siq5005/astrbot_plugin_arknights/issues/3)）：AstrBot 的「更新日志」弹窗只读插件根目录下的 `CHANGELOG.md`（依次尝试 `CHANGELOG.md` / `changelog.md` / `CHANGELOG` / `changelog`），此前本插件只有 README 里的更新日志章节，仪表盘里因此是空的。现在两个文件同源，集成检查会校验两边的最新版本号一致，防止发版时只改一边
+
+### 0.4.2 (2026-10-13)
+
+- 新增服务端健康看门狗（默认关闭）。配置 `health_watch_umo` 后，插件会每 5 分钟探一次
+  自建源的健康接口，**连续三次异常或服务端缓存过期时私聊告警**，恢复后再通知一次。
+- 盯的是 `last_error` 而不是 `stale`：服务端刷新失败会保留上一份缓存，`stale` 要等
+  一小时才翻，而 `last_error` 在第一次失败时就写上了，能提前约 35–50 分钟发现。
+- `server/README.md` 的排障指引改指 `/var/log/arksource.log`（journald 在该主机读不到）。
+
+### 0.4.1 (2026-10-13)
+
+- 修复定时任务可能被静默跳过的问题：APScheduler 的 `misfire_grace_time` 默认仅 1 秒，
+  事件循环被渲染占用超过 1 秒时该次执行会被丢弃——公告推送会因此晚一个轮询周期，
+  每日签到甚至可能整天不执行。现在签到给 1 小时宽限，理智与公告轮询各给 5 分钟。
+- 启动日志现在也会报告公告轮询的间隔。
+
+### 0.4.0 (2026-10-12)
+
+- 公告推送默认改用自建的森空岛「官方」栏目源，内容比官网公告更全：新增官方
+  PV / EP、干员展示、服饰、家具、OST 等官网不发布的动态。
+- 视频类动态以封面图 + 标题 + 正文摘要推送，不下载视频文件、不附原文链接。
+- 自建源某次轮询失败时按配置的重试间隔依次重试，全部失败才向订阅者告警并
+  自动降级到官网公告源；降级期间每次轮询都会探测自建源，恢复后自动切回并
+  再次通知。
+- 新增公告推送排除关键词，默认排除签到福利、周记表、每日谜题、创作集锦、
+  模组/工具更新、有奖活动等社区向内容。
+- 自建源可自行部署，见 `server/README.md`。
+
+### 0.3.9 (2026-10-10)
+
+- 🐛 **抽卡分析改为按单个卡池分别统计**：原先把同一**类型**的多个卡池合并成一个区块（例如把 `NORM_74_0_5` 与 `NORM_76_0_3` 并成一段「标准寻访」）。而轮换类卡池（常驻标准、单 UP、双 UP）在游戏数据里**共用同一个通用名**（如「适合多种场合的强力干员」），合并后每个池子的明细行名字完全相同 —— 看起来就像「两个卡池的记录被混在一起」。现在**每个卡池独立成段**，各自计算保底、平均出六与评级
+- 🐛 **修复抽卡记录时间戳误判**：官方接口返回的是**毫秒**时间戳（13 位），而代码按**秒**解析，`datetime` 直接溢出后被异常分支吞掉，导致**所有日期显示为空**（卡片上的时间范围、`ark抽卡记录` 的日期都受影响）。现按位数自动归一化，秒与毫秒都能正确解析
+- ✨ **新增干员名字表**：每段现在显示该卡池的 **UP 六星干员**（如 `UP 林 / 娜仁图亚`），即使是通用名的轮换池也能一眼分辨。名字表来自 `character_table.json`（14 MB，jsDelivr gzip 后约 490 KB），插件**只保留并缓存 `id → 名字` 的紧凑表（约 48 KB）**，不会把大文件写到磁盘；不依赖账号已持有干员，因此**新干员也能显示名字**
+- ✨ 每段显示卡池的**开放时间范围**
+- 🐛 **UP 名单缺失时说明具体原因**：原先统一显示含糊的「该卡池族没有可用的 UP 名单」。现在按卡池类型区分，例如「定向甄选由玩家自选 UP 干员，官方数据不含固定 UP 名单」与「数据源未收录常驻标准寻访的 UP 干员」。需要说明的是，**定向甄选本来就不存在固定 UP 名单**（由玩家自选），所以不做 UP / 歪判定是正确行为，而非数据缺失
+
+### 0.3.8 (2026-10-09)
+
+- 🐛 **修复公告推送把几个月前的旧条目当成「新公告」**（[#2](https://github.com/Siq5005/astrbot_plugin_arknights/issues/2)），共四处改动：
+
+  - **公告源改用 `LATEST` 分组**：原先取 `ANNOUNCEMENT + ACTIVITY + NEWS` 三组并集。官网每个分类各自有几百条历史、页面只渲染各自最新的 12 条，于是拿到的是横跨数月乃至去年的约 36 条。`LATEST` 才是官网定义的「最新 12 条」（`total=12, end=true`）
+  - **修复列表解析越界**：原先从分组标记一直扫描到页面末尾，会把**后续所有分组**的条目一并吞掉 —— 这才是「36 条」的真正来源。现在按各分组自己的 `total` / `end` 字段定位列表结束（此问题由 #2 的排查顺带暴露）
+  - **新增 24 小时推送窗口**（`announce_max_age_hours`，默认 24）：只推送发布时间在窗口内的公告，杜绝窗口边缘的旧条目被晚推
+  - **公告水位线改为落盘**：原先以内存中的 id 集合判断新旧、重启即丢状态。现在持久化时间水位线，重启既不重推已发出的，也不会丢掉停机期间到达的新公告
+
+### 0.3.7 (2026-09-23)
+
+- 🐛 **修复群聊理智提醒不显示是谁的账号**（[#1](https://github.com/Siq5005/astrbot_plugin_arknights/issues/1)）：原先推送文案固定为「理智已回满（x / y），记得清体力。」，在群里完全看不出是谁的提醒。现在**写明角色名**（如 `探姬#9315 的理智已回满…`）并在群聊中 **@ 订阅者本人**；私聊不加 @（无意义）
+
+### 0.3.6 (2026-09-17)
+
+- ✨ **公告订阅推送附带详情卡**：原先只推送标题与时间，而公告正文主要就是图片，等于把内容丢了。现在新公告会渲染成详情卡（与 `ark公告 <编号>` 同一张卡，含官方配图）后推送，前 `announce_push_cards` 条（默认 3）出卡，其余保留标题列表
+- 📌 **说明公告源**：公告来自鹰角官网 `ak.hypergryph.com`。森空岛**没有**明日方舟公告接口（[社区 API 文档](https://github.com/ProbiusOfficial/Skland_API) 收录的只有账号、Cred、角色绑定、签到与玩家数据），终末地插件用的也是第三方协议终端而非森空岛
+
+### 0.3.5 (2026-09-17)
+
+- 🔧 **适配插件市场日志规范**：市场要求插件的 logger 必须且只能从 `astrbot.api` 导入，禁止使用 `logging.getLogger`。`core/` 下的模块原先用标准库日志，现已统一整改：
+
+  - `core/gamedata.py`、`store.py`、`render.py`、`gacha.py`、`gacha_store.py` 改为 `from astrbot.api import logger`
+  - `core/skland.py`、`hypergryph.py`、`announce.py` 的 logger 属**从未使用的死代码**（这三处原本定义了 logger 却一次都没调用），直接移除
+
+  整个仓库现已无任何 `logging` 引用。为保持单测可在不安装 AstrBot 的情况下运行，`tests/conftest.py` 在框架缺失时注入一个空的 logger 桩；集成检查仍走真实 AstrBot 以验证真实导入路径
+
+### 0.3.4 (2026-09-17)
+
+- 🐛 **修复扫码绑定偶发失败**：`poll_qr` 只把 `status=100`（未扫码）当作等待，其余非 0 状态一律当错误抛出。但用户扫码后接口会返回 `{"status": 101, "msg": "已扫码待确认"}` —— 这是**正常的中间状态**（还需在 APP 里点确认），却被判为失败并立即中止，用户看到「扫码登录失败：已扫码待确认」。现在**任何非 0 状态都保持轮询**，由 120 秒超时兜底；只有 `status=0` 才算成功
+  之前偶发成功是因为轮询每 2 秒一次，若用户在两次轮询之间就完成确认，会直接看到成功状态
+
+### 0.3.3 (2026-09-17)
+
+- 🐛 **修复签到恒返回 `400 Bad Request`**：`core/skland.py` 里只有签到这一个请求用原始 body 发送（`content=`），而 httpx 只在 `json=` 时才自动补 `Content-Type`。缺这个头会被森空岛判为请求非法，于是**签到单独失败、其它接口全部正常**。签名请求现在带 body 时显式补 `Content-Type: application/json`
+- 🐛 **失败原因不再被吞掉**：原来 4xx 直接 `raise_for_status()`，森空岛在响应体里给出的真实原因（如「登录状态已失效」）被丢弃，用户只看到无意义的 `400 Bad Request`。现在 4xx 会先解析响应体，优先透出森空岛自己的 `message`，取不到时才回退到状态码
+
+### 0.3.2 (2026-09-16)
+
+- 🎨 **卡片视觉改版**：每张卡片改为**独立配色主题**，不再共用单一琥珀色，替换 0.3.0 引入的水印 / 暗角 / 辉光方案。新增 `--theme` / `--theme-2` / `--theme-soft` 三件套，`.card` 内 `--accent` 直接取 `--theme`，主题类由渲染器按模板名自动注入，现覆盖全部 13 张卡片
+- 🎨 **干员瓦片按稀有度着色**：渲染时给瓦片加 `rarity-{星级}` 类（4★ / 5★ / 6★ 各有配色），星级数据由 `core/cards.py` 与 `core/gacha.py` 一并提供
+- 🎨 排版与结构刷新：卡片圆角、顶部主题双色条、右上角旋转装饰框、面板顶部主题渐变条、分区标题改菱形标记，底色改为 `#151824 → #0b0d14` 渐变 + 48px 蓝图网格
+
+### 0.3.1 (2026-09-16)
+
+- 🐛 **修复 `ark绑定` 双回复**：二维码为拿到 `message_id`（用于过期撤回）经平台客户端直发，绕过了 AstrBot 的发送登记，框架认为本条消息什么都没发出，主管道 LLM 于是又答了一句。现在发送成功后显式 `stop_event()`；扫码结果的「绑定成功 / 已过期」通知走 `context.send_message`，与事件解耦，不受影响
+
+### 0.3.0 (2026-09-16)
+
+首个插件市场发布版。
+
+- 🔒 **指令前缀由 `方舟` 改为 `ark`**，与终末地等插件彻底隔离
+- 💬 **群聊全面开放**：绑定与订阅均可在群聊使用，推送目标为发起指令的那个会话；群聊扫码会附上凭证警告
+- 📢 **官方公告改用官网数据源**：原游戏内配置自 2025-05 起已停止更新（列表停留在一年多前）；详情改为渲染卡片，保留官方富文本排版与内嵌配图
+- 💾 **抽卡记录本地持久化**：增量合并并按 `(卡池类别, 时间, 位置)` 去重，历史只增不减；新增 `ark抽卡分析 同步`（别名 `ark抽卡同步`）与 `ark抽卡重置`
+- 🎨 卡片背景改为多层 CSS 装饰（蓝图网格 / 暗角 / 辉光 / 徽记水印 / 分卡主题），无位图素材
+- 🐛 修复长卡片渲染截断：超过 Chromium 16384px 纹理上限时自动降级为 1x
+- 📸 README 补齐 13 张实际渲染预览图（原生 1800px）
+- 🛠️ 面向插件市场：`metadata.yaml` 补全字段、作者署名统一为 **Coe**、集成检查加入版本与署名一致性断言
+
+### 0.2.0 (2026-09-16)
+
+- ✨ **抽卡分析**：官方抽卡记录导入，按卡池族分别统计（平均出六 / 平均 UP / 总抽数 / 当前保底），六星序列、UP / 歪判定与欧非评级
+- 🐛 **统计修正**：去重键加入 gacha category（原先跨类别游标相同会丢记录）；UP 名单只取 `upCharInfo`（原先把 `availCharInfo` 当 UP，导致歪恒为 0）；保底与平均改为按卡池族统计（原先跨卡池混算）
+- ✨ 日常玩法：基建、剿灭、集成战略、任务、公开招募
+- ✨ 便签新增助理立绘、签名、干员数与时装数分列
+- 🎨 全部卡片按明日方舟 UI 重绘：近黑底 + 琥珀强调、角标括线、危险条纹、`//` 分区标题
+- 🖼️ 接入干员立绘 / 头像、职业徽章、稀有度 / 精英化 / 潜能标记、基建设施图标、时装立绘
+- ✨ 漏写 `~` 唤醒前缀时主动提示正确写法
+
+### 0.1.0 (2026-09-16)
+
+- ✨ 首个版本：扫码绑定、便签、理智、签到、干员图鉴与详情、帮助菜单
+- ✨ 理智回满推送、群签到通知
+- 🎨 Playwright + Jinja2 卡片渲染基座
+
+</details>
+
+---
+
+## 🙏 鸣谢
+
+### 协议实现参考（均为 MIT 许可）
+
+- [astrbot_plugin_skland](https://github.com/Azincc/astrbot_plugin_skland) —— 森空岛设备指纹与请求签名算法的参考实现
+- [AstrBot-SenKongDao-Check-in](https://github.com/Twilight719/AstrBot-SenKongDao-Check-in) —— 理智回满外推公式与订阅推送思路
+
+### 产品形态参考
+
+- [astrbot_plugin_endfield](https://github.com/Entropy-Increase-Team/astrbot_plugin_endfield)（**AGPL-3.0**）—— 仅作产品形态与功能设计参考，**本项目未复用其任何代码**
+- [astrbot_plugin_mrfz_haunting_query](https://github.com/R1ckyQaQ/astrbot_plugin_mrfz_haunting_query)（**AGPL-3.0**）—— 抽卡记录接口调研参考
+
+> 需要特别说明：终末地插件与抽卡查询插件均为 AGPL-3.0。为保持本项目 MIT 许可，其代码（包括渲染器）均未被复制或移植，相关能力为独立实现。若将来需要复用它们的代码，本项目必须改为 AGPL-3.0 发布。
+
+### 插件图标
+
+`logo.png` 由本插件作者使用 `gpt-image-2.5` 生成（提示词见 `docs/preview/ui-prompt.md`），
+为原创抽象图形，不含任何官方角色或素材，可随本项目以 MIT 许可使用。
+
+### 图像资源出处
+
+卡片里的图片全部来自公开的游戏资源镜像，**每一个路径在写进代码前都实测过 HTTP 200**，没有猜测：
+
+| 资源 | 用途 | 来源 |
+|---|---|---|
+| `torappu.prts.wiki/assets` | 干员头像、精英化立绘、技能图标 | PRTS Wiki 的官方资源镜像 |
+| [Aceship/Arknight-Images](https://github.com/Aceship/Arknight-Images) | 职业徽章（`classes/class_*.png`）、稀有度 / 精英化 / 潜能标记（`ui/rank`、`ui/elite`、`ui/potential`）、基建设施图标（`ui/infrastructure`）、时装立绘（`portraits/`）、物品图标（`items/`） | GitHub |
+| [yuanyan3060/ArknightsGameResource](https://github.com/yuanyan3060/ArknightsGameResource) | 时装立绘（`skin/`）、物品稀有度框（`item_rarity_img/`）、基建技能图标（`building_skill/`）、游戏数据表（`gamedata/excel/`，用于卡池与 UP 名单） | GitHub |
+
+图片经 `cdn.jsdelivr.net` 的 GitHub 镜像加载（国内可达性优于 `raw.githubusercontent.com`）。
+
+### 数据来源
+
+| 数据 | 来源 |
+|---|---|
+| 账号、签到、便签、理智、干员、基建、剿灭、集成战略、任务、公招 | 森空岛官方接口 |
+| 抽卡记录 | 鹰角官网 `ak.hypergryph.com` |
+| 卡池元数据（名称 / 时间 / 规则类型） | `yuanyan3060/ArknightsGameResource` 的 `gacha_table.json` |
+| 卡池 UP 名单 | PRTS `weedy.prts.wiki/gacha_table.json` |
+| 官方公告 | 官网 `ak.hypergryph.com/news` 的 **`LATEST`** 分组（官网定义的「最新 12 条」）；正文取自详情页。原 `ak-conf.hypergryph.com` 的配置自 2025-05 起未再更新，已弃用 |
+
+> 本项目与鹰角网络、PRTS Wiki、上述资源仓库无隶属关系，仅使用其公开资源；如相关方有异议会立即移除。
+
+## 📄 许可
+
+[MIT](LICENSE)
+
+
+---
+
+## ❓ 常见问题
+
+### Q1: 为什么我的 `扫码绑定` / `理智` / `便签` 没有反应？
+
+因为这些是**终末地插件**的指令，不是本插件的。本插件的指令一律以 `ark` 开头，例如 `ark绑定`、`ark理智`、`ark便签`。发送 `ark帮助` 可看完整菜单。
+
+### Q2: 安装后无法渲染图片？
+
+确认已执行 `playwright install chromium`。渲染失败时插件会降级为文本摘要，不会报错崩掉。
+
+### Q3: 提示凭证失效？
+
+森空岛的登录凭证有有效期。重新执行 `ark绑定` 扫码即可（群聊 / 私聊都可以）。插件检测到凭证失效时会自动清除该绑定。
+
+### Q4: 理智数值和游戏内不一致？
+
+森空岛接口返回的是**上次同步的快照**。插件会用恢复速率（6 分钟/点）从回满时刻反推当前理智，卡片上会标注数据时间。若偏差较大，在森空岛 APP 中同步一次账号即可。
+
+### Q5: 抽卡分析显示「不做 UP / 歪判定」？
+
+部分特殊卡池（定向甄选、中坚 FES、跨年欢庆、归航等）在官方数据里**没有 UP 名单**。这种卡池的所有六星都在池内，没有「歪」的概念，因此插件不做判定而不是猜一个结果。
+
+### Q6: 账号凭证是怎么存的？
+
+保存在 `AstrBot/data/plugin_data/astrbot_plugin_arknights/users.json`，文件权限 `0600`，仅本机可读，且不会在任何回复中回显。
+
+<div align="center">
+
+### 如果喜欢这个插件，别忘了给仓库点个 ⭐
+
+</div>

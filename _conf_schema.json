@@ -1,0 +1,104 @@
+{
+  "render_timeout": {
+    "description": "图片渲染超时时间(ms)",
+    "type": "int",
+    "default": 30000
+  },
+  "data_ttl": {
+    "description": "玩家数据缓存时间(秒)",
+    "type": "int",
+    "default": 300,
+    "hint": "同一账号重复查询在该时间内直接复用缓存，避免频繁请求触发风控"
+  },
+  "sign_time": {
+    "description": "每日自动签到时间",
+    "type": "string",
+    "default": "00:05",
+    "hint": "格式 HH:MM"
+  },
+  "sanity_poll_interval": {
+    "description": "理智订阅轮询间隔(分钟)",
+    "type": "int",
+    "default": 20,
+    "hint": "建议 10-30，过短可能触发风控"
+  },
+  "max_bindings": {
+    "description": "单用户最大绑定数",
+    "type": "int",
+    "default": 5,
+    "hint": "0 表示不限制"
+  },
+  "announce_poll_interval": {
+    "description": "公告订阅轮询间隔(分钟)",
+    "type": "int",
+    "default": 30,
+    "hint": "开了公告订阅后，按该间隔检查是否有新公告；建议 15-60"
+  },
+  "secretary_art": {
+    "description": "便签助理立绘",
+    "type": "string",
+    "enum": [
+      "精一立绘",
+      "精二立绘",
+      "当前时装",
+      "随机图池"
+    ],
+    "default": "精一立绘",
+    "hint": "默认统一使用精一立绘；随机图池会在精一 / 精二 / 当前时装之间随机"
+  },
+  "gacha_cache_ttl": {
+    "description": "抽卡记录缓存时间(秒)",
+    "type": "int",
+    "default": 21600,
+    "hint": "该时间内直接使用本地记录，不再请求官网；抽卡记录会持续累积保存。发送 ark抽卡分析 同步 可强制刷新"
+  },
+  "announce_push_cards": {
+    "description": "公告推送附带卡片数",
+    "type": "int",
+    "default": 3,
+    "hint": "新公告推送时，前 N 条渲染为详情卡（含官方配图）；其余只给标题。设为 0 则全部只发文字"
+  },
+  "announce_max_age_hours": {
+    "description": "公告推送时间窗口(小时)",
+    "type": "int",
+    "default": 24,
+    "hint": "只推送发布时间在该窗口内的公告，避免把窗口边缘的旧条目当成新公告"
+  },
+  "feed_source": {
+    "description": "公告推送数据源",
+    "type": "string",
+    "enum": ["selfhosted", "official"],
+    "default": "selfhosted",
+    "hint": "selfhosted = 自建森空岛官方源（含 PV/EP 视频等官网没有的内容）；official = 官网公告源。自建源连续失败会自动降级到官网源"
+  },
+  "feed_base_url": {
+    "description": "自建源地址",
+    "type": "string",
+    "default": "https://ark.youyou.ink/api/ark/v1",
+    "hint": "默认无需修改"
+  },
+  "feed_api_key": {
+    "description": "自建源访问密钥",
+    "type": "string",
+    "default": "0436025682760fcf7e839ea21374f73c22e992000c67fc1e",
+    "hint": "已内置默认值，无需修改"
+  },
+  "feed_exclude_keywords": {
+    "description": "公告推送排除关键词",
+    "type": "string",
+    "default": "签到福利,周记表,每日谜题,猜猜我是谁,创作集锦,版区作品,模组,游戏工具,有奖活动,创作者应援,讨论楼,热议",
+    "hint": "英文逗号分隔；标题命中任一关键词的条目不会推送。留空则不过滤"
+  },
+  "feed_retry_delays": {
+    "description": "自建源失败后的重试间隔(分钟)",
+    "type": "string",
+    "default": "1,3,5",
+    "hint": "英文逗号分隔。每次轮询发现自建源失败后，按这些间隔依次重试；全部失败才降级到官网源并告警。留空表示失败即降级"
+  },
+  "health_watch_umo": {
+    "description": "服务端健康告警接收会话",
+    "type": "string",
+    "default": "",
+    "hint": "填写接收告警的会话（如 coe:FriendMessage:12345）。留空则不启用健康看门狗；自建源异常时会私聊提醒，恢复后再通知一次"
+  }
+}

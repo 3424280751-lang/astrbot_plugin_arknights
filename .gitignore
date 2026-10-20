@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+.venv/
+.cache/
+node_modules/
+.ruff_cache/
+.pytest_cache/
+
+# Agent planning artifacts: kept on disk, never published.
+# They carry local recon notes (host IPs, machine specs, upstream probe results)
+# that do not belong in a public plugin repository.
+docs/superpowers/
+docs/specs/
+
+# Local accounts, runtime data and secrets
+.env
+.env.*
+users.json
+gacha.json
+*.db
+*.db-*
+*.log
+render_cache/
+plugin_data/
+*.bak
+.DS_Store

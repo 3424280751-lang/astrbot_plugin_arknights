@@ -1,0 +1,2174 @@
+"""AstrBot entry point for the Arknights (罗德岛终端) plugin.
+
+This is the only module that touches the AstrBot framework; every protocol
+detail lives under ``core/`` so it can be unit tested without the framework.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import html as html_module
+import io
+import random
+import re
+import time
+from pathlib import Path
+from typing import Any
+
+import qrcode
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.message_components import At, AtAll, Image, Plain, Reply
+from astrbot.api.star import Context, Star, register
+from astrbot.core.star.filter.command import CommandFilter
+from astrbot.core.star.star_handler import EventType, star_handlers_registry
+from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+
+from .core.announce import AnnounceClient, AnnounceError
+from .core.cards import build_note_context, build_sanity_context
+from .core.daily import (
+    build_building_context,
+    build_campaign_context,
+    build_recruit_context,
+    build_rogue_context,
+    build_task_context,
+)
+from .core.feed import DEFAULT_BASE_URL, FeedClient, FeedError, _body_html
+from .core.gacha import GachaClient, GachaError, analyze, format_record_time
+from .core.gacha_store import GachaStore
+from .core.gamedata import GameData
+from .core.hypergryph import HypergryphClient, HypergryphError
+from .core.operators import (
+    build_operator_context,
+    build_roster_context,
+    find_operator,
+    group_operators,
+)
+from .core.render import Renderer
+from .core.skland import SignInResult, SklandClient, SklandError, UserBinding
+from .core.store import Store
+
+PLUGIN_NAME = "astrbot_plugin_arknights"
+PLUGIN_VERSION = "0.4.6"
+
+# How often the health watchdog probes the self-hosted service, and how many
+# consecutive bad observations it takes to raise an alert. The service writes
+# `last_error` on the very first failed refresh but only flips `stale` after
+# `stale_minutes`, so watching `last_error` catches a dead credential far sooner;
+# requiring several consecutive hits rides out a transient network blip.
+HEALTH_WATCH_MINUTES = 5
+HEALTH_WATCH_FAILURES = 3
+
+# Seconds the QR code stays valid, and how often it is polled.
+QR_TIMEOUT = 120
+QR_POLL_INTERVAL = 2
+
+QR_PROMPT = """请使用「森空岛」APP 扫描二维码完成登录
+
+1. 打开森空岛 APP
+2. 点击右上角「+」→「扫一扫」
+3. 扫描下方二维码并确认登录
+
+二维码 2 分钟内有效；登录成功、超时或被拒后会自动撤回。"""
+
+# Appended to the QR prompt when binding is started in a group chat.
+GROUP_QR_WARNING = (
+    "\n\n群聊中扫码请注意：二维码等同于登录凭证，不要转发给他人。\n"
+    "谁先扫码，TA 的森空岛账号就会绑定到发起指令的这个人名下。"
+)
+
+NO_BINDING_TEXT = "你还没有绑定账号。发送 `ark绑定` 扫码登录即可。"
+
+# Substrings that indicate the stored passport token is no longer usable.
+AUTH_ERROR_MARKERS = ("未登录", "失效", "过期", "unauthorized", "401", "403")
+
+# How many source images to forward when a card cannot be rendered; the rest are
+# reachable through `ark公告 <编号>`.
+_MAX_FALLBACK_IMAGES = 6
+
+# Every command is namespaced with ark so that it can never collide with the
+# Endfield plugin (which registers bare 理智 / 便签 / 签到 / 扫码绑定 ... and a
+# permissive "xx面板" regex). Keep this prefix on every command.
+CMD_PREFIX = "ark"
+
+HELP_TEXT = """罗德岛终端 · 明日方舟助手
+
+所有指令以 `ark` 开头，避免与终末地插件（zmd）的同名指令冲突。
+
+【账号绑定】
+ark绑定              使用森空岛 APP 扫码登录（唯一登录方式）
+ark绑定列表          查看所有绑定账号
+ark切换绑定 <序号>    切换主账号
+ark删除绑定 <序号>    解绑指定账号
+
+【数据查询】
+ark便签              账号总览
+ark理智              理智与回满时间
+ark干员列表          已持有干员图鉴
+ark干员 <干员名>      单个干员详情
+
+【日常玩法】
+ark基建              基建设施与干员心情
+ark剿灭              剿灭作战与本周合成玉
+ark肉鸽              集成战略收藏品与投资
+ark任务              每日/每周任务与周常奖励
+ark公招              公开招募栏位状态
+
+【官方公告】
+ark公告              公告列表（`ark公告 <编号>` 看正文）
+ark订阅公告 / ark取消订阅公告  新公告推送到当前会话
+
+【抽卡】
+ark抽卡分析          六星统计、保底与 UP 判定
+ark抽卡记录          最近的抽卡记录
+ark抽卡分析 同步     强制重新同步官网记录（也可写 ark抽卡同步）
+ark抽卡重置          清空本机保存的抽卡记录
+
+【签到与提醒】
+ark签到              手动执行森空岛签到
+ark订阅理智 / ark取消订阅理智  理智回满推送
+ark订阅签到 / ark取消订阅签到  群内签到结果通知
+
+账号凭证仅保存在本机，且不会在任何回复中回显。
+"""
+
+# Structured copy of HELP_TEXT used by the rendered help card.
+HELP_SECTIONS = [
+    {
+        "title": "账号绑定",
+        "items": [
+            {"cmd": "ark绑定", "desc": "森空岛 APP 扫码登录（唯一登录方式）"},
+            {"cmd": "ark绑定列表", "desc": "查看所有绑定账号"},
+            {"cmd": "ark切换绑定 <序号>", "desc": "切换主账号"},
+            {"cmd": "ark删除绑定 <序号>", "desc": "解绑指定账号"},
+        ],
+    },
+    {
+        "title": "数据查询",
+        "items": [
+            {"cmd": "ark便签", "desc": "账号总览"},
+            {"cmd": "ark理智", "desc": "理智与回满时间"},
+            {"cmd": "ark干员列表", "desc": "已持有干员图鉴"},
+            {"cmd": "ark干员 <干员名>", "desc": "单个干员详情"},
+        ],
+    },
+    {
+        "title": "日常玩法",
+        "items": [
+            {"cmd": "ark基建", "desc": "基建设施与干员心情"},
+            {"cmd": "ark剿灭", "desc": "剿灭作战与本周合成玉"},
+            {"cmd": "ark肉鸽", "desc": "集成战略收藏品与投资"},
+            {"cmd": "ark任务", "desc": "每日/每周任务与周常奖励"},
+            {"cmd": "ark公招", "desc": "公开招募栏位状态"},
+        ],
+    },
+    {
+        "title": "官方公告",
+        "items": [
+            {"cmd": "ark公告", "desc": "公告列表，可带编号看正文"},
+            {"cmd": "ark订阅公告 / ark取消订阅公告", "desc": "新公告推送到当前会话"},
+        ],
+    },
+    {
+        "title": "抽卡",
+        "items": [
+            {"cmd": "ark抽卡分析", "desc": "六星统计、保底与 UP 判定"},
+            {"cmd": "ark抽卡记录", "desc": "最近的抽卡记录"},
+            {"cmd": "ark抽卡分析 同步 / ark抽卡同步", "desc": "强制重新同步官网记录"},
+            {"cmd": "ark抽卡重置", "desc": "清空本机保存的抽卡记录"},
+        ],
+    },
+    {
+        "title": "签到与提醒",
+        "items": [
+            {"cmd": "ark签到", "desc": "手动执行森空岛签到"},
+            {"cmd": "ark订阅理智 / ark取消订阅理智", "desc": "理智回满推送到当前会话"},
+            {"cmd": "ark订阅签到 / ark取消订阅签到", "desc": "群内签到结果通知"},
+        ],
+    },
+]
+
+
+@register(PLUGIN_NAME, "Coe", "罗德岛终端", PLUGIN_VERSION)
+class ArknightsPlugin(Star):
+    """Arknights data query and sign-in plugin."""
+
+    def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
+        """Initialize the plugin.
+
+        Args:
+            context: AstrBot plugin context.
+            config: Plugin configuration parsed from ``_conf_schema.json``.
+        """
+        super().__init__(context)
+        self.config: dict[str, Any] = config if config is not None else {}
+        self.store = Store()
+        self.skland = SklandClient()
+        self.hypergryph = HypergryphClient()
+        self._qr_tasks: set[asyncio.Task[None]] = set()
+        self._templates_dir = Path(__file__).parent / "templates"
+        self._renderer: Renderer | None = None
+        self._base_css: str | None = None
+        # uid -> (expiry timestamp, player info payload)
+        self._player_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._gamedata = GameData(
+            Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME / "gamedata"
+        )
+        self._gacha = GachaClient()
+        self._gacha_store = GachaStore()
+        self._announce = AnnounceClient()
+        # user_key -> whether a sanity-full notice has already been sent
+        self._sanity_notified: dict[str, bool] = {}
+        # Health-watchdog state: consecutive bad observations, and whether an
+        # alert has already gone out for the current incident.
+        self._health_failures = 0
+        self._health_alerted = False
+        self.scheduler: AsyncIOScheduler | None = None
+
+    async def initialize(self) -> None:
+        """Start the automatic sign-in and sanity polling jobs."""
+        # The self-hosted source is preferred; the website source stays as the
+        # fallback and is also what `feed_source: official` selects outright.
+        self._feed = FeedClient(
+            base_url=str(self.config.get("feed_base_url") or DEFAULT_BASE_URL),
+            api_key=str(self.config.get("feed_api_key") or ""),
+        )
+        hour, minute = self._parse_sign_time(self.config.get("sign_time", "00:05"))
+        minutes = max(10, int(self.config.get("sanity_poll_interval", 20) or 20))
+        try:
+            self.scheduler = AsyncIOScheduler()
+            self.scheduler.add_job(
+                self._auto_sign_job,
+                CronTrigger(hour=hour, minute=minute),
+                id="arknights_auto_sign",
+                replace_existing=True,
+                # A stall around 00:05 must not cost the whole day's sign-in.
+                misfire_grace_time=3600,
+            )
+            self.scheduler.add_job(
+                self._sanity_poll_job,
+                IntervalTrigger(minutes=minutes),
+                id="arknights_sanity_poll",
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+            announce_minutes = max(
+                15, int(self.config.get("announce_poll_interval", 30) or 30)
+            )
+            self.scheduler.add_job(
+                self._announce_poll_job,
+                IntervalTrigger(minutes=announce_minutes),
+                id="arknights_announce_poll",
+                replace_existing=True,
+                # Rendering blocks the same event loop for seconds; without this
+                # the poll is skipped and the push slips a whole interval.
+                misfire_grace_time=300,
+            )
+            self.scheduler.add_job(
+                self._health_watch_job,
+                IntervalTrigger(minutes=HEALTH_WATCH_MINUTES),
+                id="arknights_health_watch",
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+            self.scheduler.start()
+            logger.info(
+                "罗德岛终端定时任务已启动：签到 %02d:%02d，理智轮询每 %d 分钟，公告轮询每 %d 分钟",
+                hour,
+                minute,
+                minutes,
+                announce_minutes,
+            )
+        except Exception as exc:  # noqa: BLE001 - scheduling must not block loading
+            logger.error("启动定时任务失败: %s", exc)
+            self.scheduler = None
+
+    @staticmethod
+    def _parse_sign_time(raw: Any) -> tuple[int, int]:
+        """Parse the configured ``HH:MM`` sign-in time.
+
+        Args:
+            raw: Configured value.
+
+        Returns:
+            Tuple of ``(hour, minute)``, falling back to ``(0, 5)`` when invalid.
+        """
+        try:
+            hour_text, _, minute_text = str(raw or "").partition(":")
+            hour, minute = int(hour_text), int(minute_text)
+        except (TypeError, ValueError):
+            return 0, 5
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+        return 0, 5
+
+    async def terminate(self) -> None:
+        """Release network resources and cancel background tasks."""
+        if self.scheduler is not None:
+            try:
+                self.scheduler.shutdown(wait=False)
+            except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+                logger.debug("关闭定时任务失败: %s", exc)
+            self.scheduler = None
+        for task in list(self._qr_tasks):
+            task.cancel()
+        self._qr_tasks.clear()
+        if self._renderer is not None:
+            await self._renderer.close()
+            self._renderer = None
+        await self.skland.close()
+        await self.hypergryph.close()
+        await self._gamedata.close()
+        await self._gacha.close()
+        await self._announce.close()
+        await self._feed.close()
+
+    # ── helpers ───────────────────────────────────────────────────────────
+
+    def _secretary_mode(self) -> str:
+        """Map the configured assistant-artwork label to an asset mode.
+
+        Returns:
+            One of the ``secretary_portrait`` mode strings.
+        """
+        mapping = {
+            "精一立绘": "elite1",
+            "精二立绘": "elite2",
+            "当前时装": "skin",
+            "随机图池": "random",
+        }
+        return mapping.get(str(self.config.get("secretary_art") or ""), "elite1")
+
+    async def _render(self, template: str, data: dict[str, Any]) -> Path | None:
+        """Render a card image.
+
+        Args:
+            template: Template filename inside the plugin's ``templates`` dir.
+            data: Template variables.
+
+        Returns:
+            Path of the rendered image, or ``None`` when rendering is unavailable
+            so the caller can fall back to text.
+        """
+        if self._renderer is None:
+            cache_dir = (
+                Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME / "render_cache"
+            )
+            self._renderer = Renderer(
+                self._templates_dir,
+                cache_dir,
+                int(self.config.get("render_timeout", 30000) or 30000),
+            )
+        if self._base_css is None:
+            try:
+                self._base_css = (self._templates_dir / "base.css").read_text(
+                    encoding="utf-8"
+                )
+            except OSError as exc:
+                logger.error("读取 base.css 失败: %s", exc)
+                self._base_css = ""
+        payload: dict[str, Any] = {
+            "base_css": self._base_css,
+            "version": PLUGIN_VERSION,
+        }
+        payload.update(data)
+        return await self._renderer.render_html(template, payload)
+
+    async def _render_detail_card(
+        self, item: dict[str, Any], detail: dict[str, Any], note: str
+    ) -> tuple[Path | None, bool]:
+        """Render a detail card, retrying with just the cover when too tall.
+
+        Args:
+            item: Announcement record (title, date, group labels).
+            detail: Body payload with ``body_html``, ``text``, ``images`` and
+                ``image_total``.
+            note: Line appended to the trimmed card explaining what was left out.
+
+        Returns:
+            Pair ``(image, trimmed)``. ``image`` is the rendered path, or ``None``
+            when even the cover-only card cannot be rendered. ``trimmed`` is
+            ``True`` only when the cover-only retry produced that image; it is
+            ``False`` when the first render succeeded, when no retry was
+            attempted, or when the result is ``None``.
+        """
+        image = await self._render(
+            "announce_detail.html", {"announce": {**item, **detail}}
+        )
+        images = detail.get("images") or []
+        if image is not None or len(images) <= 1:
+            return image, False
+        total = len(images)
+        image = await self._render(
+            "announce_detail.html",
+            {
+                "announce": {
+                    **item,
+                    **detail,
+                    "body_html": _body_html(str(detail.get("text") or ""), images[:1])
+                    + f"<p>{html_module.escape(note)}</p>",
+                    "image_total": total,
+                }
+            },
+        )
+        return image, image is not None
+
+    @staticmethod
+    def _args(event: AstrMessageEvent) -> list[str]:
+        """Return the arguments that follow the command name.
+
+        Args:
+            event: Incoming message event.
+
+        Returns:
+            Whitespace separated argument tokens, excluding the command itself.
+        """
+        tokens = (event.message_str or "").strip().split()
+        return tokens[1:] if len(tokens) > 1 else []
+
+    @staticmethod
+    def _qr_png(data: str) -> bytes:
+        """Render arbitrary text as a PNG QR code.
+
+        The Skland login URL uses the ``hypergryph://`` custom scheme, so it has
+        to be shown as an image rather than sent as a link.
+
+        Args:
+            data: Payload to encode.
+
+        Returns:
+            PNG image bytes.
+        """
+        qr = qrcode.QRCode(box_size=8, border=2)
+        qr.add_data(data)
+        qr.make(fit=True)
+        buffer = io.BytesIO()
+        qr.make_image(fill_color="black", back_color="white").save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    async def _notify(
+        self,
+        umo: str,
+        text: str,
+        image: Path | str | None = None,
+        mention: str | None = None,
+    ) -> None:
+        """Send a message to a session outside the current event flow.
+
+        Args:
+            umo: Unified message origin of the target session.
+            text: Message text.
+            image: Optional image appended after the text; a ``str`` is a remote
+                URL, otherwise a local file path.
+            mention: Platform user id to @ before the text. Only meaningful in a
+                group session; callers decide whether to pass it.
+        """
+        chain: list[Any] = []
+        if mention:
+            chain.append(At(qq=mention))
+        chain.append(Plain(text))
+        try:
+            if image is not None:
+                try:
+                    chain.append(
+                        Image.fromURL(image)
+                        if isinstance(image, str)
+                        else Image.fromFileSystem(str(image))
+                    )
+                except Exception as exc:  # noqa: BLE001 - drop the image, keep the text
+                    logger.warning("图片构造失败，仅发送文本 (%s): %s", umo, exc)
+            await self.context.send_message(umo, MessageChain(chain))
+        except Exception as exc:  # noqa: BLE001 - never let delivery break a job
+            logger.warning("发送消息失败 (%s): %s", umo, exc)
+
+    async def _resolve_binding(
+        self, event: AstrMessageEvent
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """Look up the caller's current account and primary role.
+
+        Args:
+            event: Incoming message event.
+
+        Returns:
+            Tuple of the user record and the primary binding, or ``None`` when
+            the caller has no usable binding.
+        """
+        user = await self.store.get_user(event.get_sender_id())
+        if not user or not user.get("bindings"):
+            return None
+        primary = str(user.get("primary_uid") or "")
+        binding = next(
+            (b for b in user["bindings"] if str(b.get("uid")) == primary),
+            user["bindings"][0],
+        )
+        return user, binding
+
+    async def _complete_binding(
+        self, user_key: str, token: str, umo: str = ""
+    ) -> str | None:
+        """Validate a passport token and persist the resulting bindings.
+
+        The token is exercised through the real authorization chain rather than
+        the lightweight account endpoint, so a token that cannot actually read
+        game data is rejected up front.
+
+        Args:
+            user_key: Platform user identifier.
+            token: Hypergryph passport token.
+            umo: Session that initiated the binding, stored for later pushes.
+
+        Returns:
+            A user facing error message, or ``None`` on success.
+        """
+        try:
+            authorization = await self.skland.get_authorization(token)
+            cred = await self.skland.get_credential(authorization)
+            bindings = await self.skland.get_binding_list(cred)
+        except SklandError as exc:
+            return f"绑定失败：{exc}"
+        if not bindings:
+            return "该账号下没有找到明日方舟角色，请确认已在森空岛绑定角色后重试。"
+
+        limit = int(self.config.get("max_bindings", 5) or 0)
+        truncated = False
+        if limit and len(bindings) > limit:
+            bindings = bindings[:limit]
+            truncated = True
+
+        await self.store.upsert_auth(
+            user_key,
+            token,
+            bindings[0].nickname,
+            [binding.to_dict() for binding in bindings],
+            umo=umo,
+        )
+        suffix = f"（仅保留前 {limit} 个）" if truncated else ""
+        return f"绑定成功，共 {len(bindings)} 个明日方舟角色{suffix}。"
+
+    # ── account commands ──────────────────────────────────────────────────
+
+    @filter.command("ark帮助")
+    async def show_help(self, event: AstrMessageEvent):
+        """Show the plugin command overview as a card."""
+        image = await self._render("help.html", {"sections": HELP_SECTIONS})
+        if image is None:
+            yield event.plain_result(HELP_TEXT)
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @filter.command("ark绑定")
+    async def bind_by_qr(self, event: AstrMessageEvent):
+        """Bind an account by scanning a QR code with the Skland app."""
+        user_key = event.get_sender_id()
+        try:
+            qr = await self.hypergryph.create_qr()
+        except HypergryphError as exc:
+            yield event.plain_result(f"获取二维码失败：{exc}")
+            return
+        if not qr["scan_id"] or not qr["scan_url"]:
+            yield event.plain_result("获取二维码失败，请稍后重试。")
+            return
+
+        # A QR code is a credential: in a group anyone reading the chat could
+        # scan it first and bind their own account under the sender's id, so the
+        # in-group copy says so plainly.
+        prompt = QR_PROMPT
+        if not event.is_private_chat():
+            prompt += GROUP_QR_WARNING
+        png = self._qr_png(qr["scan_url"])
+        message_id = await self._send_qr_raw(event, png, prompt)
+        if message_id is None:
+            yield event.chain_result(
+                [
+                    Plain(prompt),
+                    Image.fromBytes(png),
+                ]
+            )
+        else:
+            # The QR goes out through the raw platform client, which bypasses
+            # AstrMessageEvent.send() and therefore never sets _has_send_oper.
+            # Without this the pipeline sees "woken by prefix, nothing sent" and
+            # runs the LLM as well, so the group gets a QR plus a second reply.
+            event.stop_event()
+
+        task = asyncio.create_task(
+            self._poll_qr_login(
+                user_key,
+                qr["scan_id"],
+                event.unified_msg_origin,
+                event,
+                message_id,
+            )
+        )
+        self._qr_tasks.add(task)
+        task.add_done_callback(self._qr_tasks.discard)
+
+    async def _send_qr_raw(
+        self, event: AstrMessageEvent, png: bytes, prompt: str
+    ) -> int | None:
+        """Send the QR image and its instructions through the platform client.
+
+        Used to capture the platform message id so the QR can be recalled once it
+        is no longer valid. Returns ``None`` when the platform does not support
+        this, in which case the caller falls back to a normal reply.
+
+        Args:
+            event: Incoming message event.
+            png: QR image bytes.
+            prompt: Instruction text sent alongside the image.
+
+        Returns:
+            The platform message id, or ``None``.
+        """
+        try:
+            if event.get_platform_name() != "aiocqhttp":
+                return None
+            payload = [
+                {
+                    "type": "image",
+                    "data": {"file": f"base64://{base64.b64encode(png).decode()}"},
+                },
+                {"type": "text", "data": {"text": prompt}},
+            ]
+            group_id = event.get_group_id()
+            if group_id:
+                result = await event.bot.send_group_msg(
+                    group_id=int(group_id), message=payload
+                )
+            else:
+                result = await event.bot.send_private_msg(
+                    user_id=int(event.get_sender_id()), message=payload
+                )
+            if result:
+                return int(result.get("message_id"))
+        except Exception as exc:  # noqa: BLE001 - fall back to a normal reply
+            logger.warning("发送二维码失败，改用普通消息: %s", exc)
+        return None
+
+    async def _recall(self, event: AstrMessageEvent, message_id: int | None) -> None:
+        """Best effort recall of a previously sent message.
+
+        Args:
+            event: Message event that carries the platform client.
+            message_id: Platform message id; ignored when ``None``.
+        """
+        if not message_id or event.get_platform_name() != "aiocqhttp":
+            return
+        try:
+            await event.bot.delete_msg(message_id=message_id)
+        except Exception as exc:  # noqa: BLE001 - recall is best effort
+            logger.debug("撤回消息失败 (%s): %s", message_id, exc)
+
+    async def _poll_qr_login(
+        self,
+        user_key: str,
+        scan_id: str,
+        umo: str,
+        event: AstrMessageEvent,
+        message_id: int | None,
+    ) -> None:
+        """Poll a QR login until it is confirmed, rejected or expires.
+
+        Args:
+            user_key: Platform user identifier.
+            scan_id: QR session identifier.
+            umo: Session used to deliver the result.
+            event: Original event, used for recalling the QR message.
+            message_id: Platform message id of the QR image, if known.
+        """
+        deadline = time.time() + QR_TIMEOUT
+        try:
+            while time.time() < deadline:
+                await asyncio.sleep(QR_POLL_INTERVAL)
+                try:
+                    scan_code = await self.hypergryph.poll_qr(scan_id)
+                except HypergryphError as exc:
+                    await self._notify(umo, f"扫码登录失败：{exc}")
+                    return
+                if not scan_code:
+                    continue
+                try:
+                    token = await self.hypergryph.get_token_by_scan_code(scan_code)
+                except HypergryphError as exc:
+                    await self._notify(umo, f"扫码登录失败：{exc}")
+                    return
+                result = await self._complete_binding(user_key, token, umo)
+                await self._notify(umo, result or "扫码绑定成功。")
+                return
+            await self._notify(umo, "二维码已过期，请重新发送 `ark绑定`。")
+        finally:
+            await self._recall(event, message_id)
+
+    @filter.command("ark绑定列表")
+    async def list_bindings(self, event: AstrMessageEvent):
+        """List every account bound by the caller."""
+        user = await self.store.get_user(event.get_sender_id())
+        if not user or not user.get("bindings"):
+            yield event.plain_result(NO_BINDING_TEXT)
+            return
+        primary = str(user.get("primary_uid") or "")
+        lines = [f"共 {len(user['bindings'])} 个绑定角色："]
+        for index, binding in enumerate(user["bindings"], 1):
+            uid = str(binding.get("uid") or "")
+            mark = " ← 当前" if uid == primary else ""
+            lines.append(
+                f"{index}. {binding.get('nick_name') or '未知'} · "
+                f"{binding.get('channel_name') or '未知服'} · uid ...{uid[-4:]}{mark}"
+            )
+        lines.append("使用 `ark切换绑定 <序号>` 或 `ark删除绑定 <序号>` 管理。")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("ark切换绑定")
+    async def switch_binding(self, event: AstrMessageEvent):
+        """Switch the primary role used by data queries."""
+        args = self._args(event)
+        user = await self.store.get_user(event.get_sender_id())
+        if not user or not user.get("bindings"):
+            yield event.plain_result("你还没有绑定账号。")
+            return
+        index = self._parse_index(args[0] if args else "")
+        if index is None or not 0 <= index < len(user["bindings"]):
+            yield event.plain_result(
+                f"序号无效。请使用 `ark绑定列表` 查看序号（1-{len(user['bindings'])}）。"
+            )
+            return
+        target = user["bindings"][index]
+        await self.store.set_primary(event.get_sender_id(), str(target.get("uid")))
+        yield event.plain_result(f"已切换到 {target.get('nick_name') or '未知角色'}。")
+
+    @filter.command("ark删除绑定")
+    async def delete_binding(self, event: AstrMessageEvent):
+        """Remove one bound role."""
+        args = self._args(event)
+        user = await self.store.get_user(event.get_sender_id())
+        if not user or not user.get("bindings"):
+            yield event.plain_result("你还没有绑定账号。")
+            return
+        index = self._parse_index(args[0] if args else "")
+        if index is None or not 0 <= index < len(user["bindings"]):
+            yield event.plain_result(
+                f"序号无效。请使用 `ark绑定列表` 查看序号（1-{len(user['bindings'])}）。"
+            )
+            return
+        target = user["bindings"][index]
+        uid = str(target.get("uid"))
+        await self.store.delete_binding(event.get_sender_id(), uid)
+        remaining = await self.store.get_user(event.get_sender_id())
+        if not remaining:
+            yield event.plain_result(
+                f"已删除 {target.get('nick_name') or '该角色'}，你已没有绑定账号。"
+            )
+            return
+        yield event.plain_result(f"已删除 {target.get('nick_name') or '该角色'}。")
+
+    @staticmethod
+    def _parse_index(raw: str) -> int | None:
+        """Parse a 1-based index supplied by the user.
+
+        Args:
+            raw: Raw argument text.
+
+        Returns:
+            Zero-based index, or ``None`` when the input is not a positive int.
+        """
+        try:
+            value = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return None
+        return value - 1 if value >= 1 else None
+
+    # ── data queries ──────────────────────────────────────────────────────
+
+    async def _player_data(
+        self,
+        user: dict[str, Any],
+        binding: dict[str, Any],
+        *,
+        include_rogue: bool = False,
+    ) -> dict[str, Any]:
+        """Fetch the in-game snapshot for a role, reusing a short lived cache.
+
+        Args:
+            user: Stored user record holding the passport token.
+            binding: Binding entry identifying the role.
+
+        Returns:
+            The ``data`` section of the player info response.
+
+        Raises:
+            SklandError: When the credential is rejected or the request fails.
+        """
+        uid = str(binding.get("uid") or "")
+        ttl = int(self.config.get("data_ttl", 300) or 300)
+        now = time.time()
+        cached = self._player_cache.get(uid)
+        if (
+            cached
+            and cached[0] > now
+            and (not include_rogue or "rogueCareerMap" in cached[1])
+        ):
+            return cached[1]
+        authorization = await self.skland.get_authorization(
+            str(user.get("token") or "")
+        )
+        cred = await self.skland.get_credential(authorization)
+        data = (
+            dict(cached[1])
+            if cached and cached[0] > now
+            else await self.skland.get_player_info(cred, uid)
+        )
+        if include_rogue:
+            topic_ids = list(
+                dict.fromkeys(
+                    str(record.get("rogueId"))
+                    for record in (data.get("rogue") or {}).get("records") or []
+                    if record.get("rogueId")
+                )
+            )
+            careers = {}
+            for offset in range(0, len(topic_ids), 3):
+                batch = topic_ids[offset : offset + 3]
+                results = await asyncio.gather(
+                    *(
+                        self.skland.get_rogue_info(cred, uid, topic_id)
+                        for topic_id in batch
+                    ),
+                    return_exceptions=True,
+                )
+                for topic_id, result in zip(batch, results, strict=True):
+                    node = None
+                    if isinstance(result, dict):
+                        career = result.get("career") or {}
+                        value = career.get("node")
+                        if (
+                            isinstance(value, int)
+                            and not isinstance(value, bool)
+                            and value >= 0
+                        ):
+                            if value > 0 or result.get("all") is not None:
+                                node = value
+                    else:
+                        logger.warning(
+                            "Rogue career request failed for %s: %s",
+                            topic_id,
+                            type(result).__name__,
+                        )
+                    careers[topic_id] = {
+                        "node": node,
+                        "clearInfo": (
+                            (result.get("career") or {}).get("clearInfo") or {}
+                        )
+                        if isinstance(result, dict)
+                        else {},
+                    }
+            data["rogueCareerMap"] = careers
+        self._player_cache[uid] = (now + ttl, data)
+        return data
+
+    async def _report_query_error(self, event: AstrMessageEvent, exc: Exception) -> str:
+        """Turn a query failure into a user facing message.
+
+        An expired credential is treated as a terminal state: the binding is
+        removed so the user is asked to re-authenticate instead of hitting the
+        same error forever.
+
+        Args:
+            event: Incoming message event identifying the caller.
+            exc: The raised error.
+
+        Returns:
+            Message text to send back.
+        """
+        text = str(exc)
+        if any(marker in text for marker in AUTH_ERROR_MARKERS):
+            await self.store.remove_user(event.get_sender_id())
+            return "账号凭证已失效，已清除你的绑定。请重新发送 `ark绑定`。"
+        return f"查询失败：{text}"
+
+    @filter.command("ark便签")
+    async def show_note(self, event: AstrMessageEvent):
+        """Show the account overview card."""
+        resolved = await self._resolve_binding(event)
+        if not resolved:
+            yield event.plain_result(NO_BINDING_TEXT)
+            return
+        user, binding = resolved
+        try:
+            data = await self._player_data(user, binding)
+        except SklandError as exc:
+            yield event.plain_result(await self._report_query_error(event, exc))
+            return
+        note = build_note_context(data, secretary_mode=self._secretary_mode())
+        image = await self._render("note.html", {"note": note})
+        if image is None:
+            yield event.plain_result(self._note_text(note))
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @staticmethod
+    def _note_text(note: dict[str, Any]) -> str:
+        """Build the plain text fallback for the note card.
+
+        Args:
+            note: Context produced by ``build_note_context``.
+
+        Returns:
+            Multi-line summary text.
+        """
+        return "\n".join(
+            [
+                f"{note['nickname'] or '未知博士'} · 等级 {note['level']}",
+                f"入职日期：{note['register_date']}",
+                f"主线进度：{note['main_stage']}",
+                f"干员 / 时装：{note['char_count']} / {note['skin_count']}",
+                f"理智：{note['sanity']['current']} / {note['sanity']['max']}"
+                f"（{note['sanity']['remaining_text']}）",
+                f"每日任务：{note['daily']['current']} / {note['daily']['total']}",
+                f"每周任务：{note['weekly']['current']} / {note['weekly']['total']}",
+                f"剿灭合成玉：{note['campaign']['current']} / {note['campaign']['total']}",
+                f"数据时间：{note['data_time']}",
+            ]
+        )
+
+    @filter.command("ark理智")
+    async def show_sanity(self, event: AstrMessageEvent):
+        """Show the sanity card."""
+        resolved = await self._resolve_binding(event)
+        if not resolved:
+            yield event.plain_result(NO_BINDING_TEXT)
+            return
+        user, binding = resolved
+        try:
+            data = await self._player_data(user, binding)
+        except SklandError as exc:
+            yield event.plain_result(await self._report_query_error(event, exc))
+            return
+        sanity = build_sanity_context(data)
+        image = await self._render("sanity.html", {"sanity": sanity})
+        if image is None:
+            yield event.plain_result(
+                f"理智：{sanity['current']} / {sanity['max']}"
+                f"（{sanity['remaining_text']}）\n"
+                f"数据时间：{sanity['data_time']}"
+            )
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    # ── sign-in and subscriptions ─────────────────────────────────────────
+
+    @staticmethod
+    def _to_binding(entry: dict[str, Any]) -> UserBinding:
+        """Convert a stored binding record back into a ``UserBinding``.
+
+        Args:
+            entry: Stored binding dictionary.
+
+        Returns:
+            The equivalent binding object.
+        """
+        return UserBinding(
+            uid=str(entry.get("uid") or ""),
+            game_id=str(entry.get("game_id") or "1"),
+            nickname=str(entry.get("nick_name") or ""),
+            channel_name=str(entry.get("channel_name") or ""),
+        )
+
+    @staticmethod
+    def _sign_line(binding: dict[str, Any], result: SignInResult) -> str:
+        """Format one sign-in outcome for a notification.
+
+        Args:
+            binding: Stored binding dictionary.
+            result: Sign-in outcome.
+
+        Returns:
+            One line of notification text.
+        """
+        name = str(binding.get("nick_name") or "未知角色")
+        if result.success:
+            awards = "、".join(result.awards) if result.awards else "无"
+            return f"{name}：签到成功（{awards}）"
+        return f"{name}：{result.error}"
+
+    @filter.command("ark签到")
+    async def do_sign(self, event: AstrMessageEvent):
+        """Run the Skland attendance sign-in for the current role."""
+        resolved = await self._resolve_binding(event)
+        if not resolved:
+            yield event.plain_result(NO_BINDING_TEXT)
+            return
+        user, binding = resolved
+        try:
+            authorization = await self.skland.get_authorization(
+                str(user.get("token") or "")
+            )
+            cred = await self.skland.get_credential(authorization)
+            result = await self.skland.sign_arknights(cred, self._to_binding(binding))
+        except SklandError as exc:
+            yield event.plain_result(await self._report_query_error(event, exc))
+            return
+        if result.success:
+            awards = "、".join(result.awards) if result.awards else "无"
+            yield event.plain_result(f"签到成功，获得：{awards}")
+        elif "已签到" in result.error or "重复" in result.error:
+            yield event.plain_result("今天已经签到过了，无需重复签到。")
+        else:
+            yield event.plain_result(f"签到失败：{result.error}")
+
+    @filter.command("ark订阅理智")
+    async def subscribe_sanity(self, event: AstrMessageEvent):
+        """Enable sanity-full notifications for the caller's current session."""
+        if not await self.store.get_user(event.get_sender_id()):
+            yield event.plain_result(NO_BINDING_TEXT)
+            return
+        await self.store.set_sanity_sub(
+            event.get_sender_id(), event.unified_msg_origin, True
+        )
+        minutes = max(10, int(self.config.get("sanity_poll_interval", 20) or 20))
+        where = "本群" if not event.is_private_chat() else "私聊"
+        yield event.plain_result(
+            f"已开启理智回满提醒，每 {minutes} 分钟检查一次，回满后会推送到{where}。\n"
+            "发送 `ark取消订阅理智` 可关闭。"
+        )
+
+    @filter.command("ark取消订阅理智")
+    async def unsubscribe_sanity(self, event: AstrMessageEvent):
+        """Disable sanity-full notifications for the caller."""
+        await self.store.set_sanity_sub(event.get_sender_id(), "", False)
+        yield event.plain_result("已关闭理智回满提醒。")
+
+    @filter.command("ark订阅签到")
+    async def subscribe_sign(self, event: AstrMessageEvent):
+        """Subscribe the current group to automatic sign-in results."""
+        group_id = event.get_group_id()
+        if not group_id:
+            yield event.plain_result("请在群聊中使用该指令。")
+            return
+        await self.store.set_sign_group(group_id, event.unified_msg_origin, True)
+        yield event.plain_result("已开启本群的自动签到结果通知。")
+
+    @filter.command("ark取消订阅签到")
+    async def unsubscribe_sign(self, event: AstrMessageEvent):
+        """Unsubscribe the current group from automatic sign-in results."""
+        group_id = event.get_group_id()
+        if not group_id:
+            yield event.plain_result("请在群聊中使用该指令。")
+            return
+        await self.store.set_sign_group(group_id, "", False)
+        yield event.plain_result("已关闭本群的自动签到通知。")
+
+    async def _sign_in_user(
+        self, user_key: str, user: dict[str, Any]
+    ) -> list[tuple[dict[str, Any], SignInResult]]:
+        """Sign in every role of one account.
+
+        Args:
+            user_key: Platform user identifier, used for logging.
+            user: Stored user record.
+
+        Returns:
+            One ``(binding, result)`` pair per role; empty when the stored
+            credential is no longer valid.
+        """
+        try:
+            authorization = await self.skland.get_authorization(
+                str(user.get("token") or "")
+            )
+            cred = await self.skland.get_credential(authorization)
+        except SklandError as exc:
+            logger.warning("[自动签到] %s 凭证失效，跳过: %s", user_key, exc)
+            return []
+        results: list[tuple[dict[str, Any], SignInResult]] = []
+        for binding in user.get("bindings") or []:
+            try:
+                result = await self.skland.sign_arknights(
+                    cred, self._to_binding(binding)
+                )
+            except SklandError as exc:
+                result = SignInResult(
+                    success=False,
+                    nickname=str(binding.get("nick_name") or ""),
+                    error=str(exc),
+                )
+            results.append((binding, result))
+        return results
+
+    async def _auto_sign_job(self) -> None:
+        """Sign in every bound account and deliver a summary.
+
+        Results go to the groups subscribed with ``ark订阅签到``; when no group is
+        subscribed they are sent privately to each account owner instead.
+        """
+        users = await self.store.all_users()
+        if not users:
+            return
+        groups = await self.store.list_sign_groups()
+        group_lines: list[str] = []
+        private: dict[str, list[str]] = {}
+
+        for user_key, user in users.items():
+            results = await self._sign_in_user(user_key, user)
+            for binding, result in results:
+                line = self._sign_line(binding, result)
+                if groups:
+                    group_lines.append(line)
+                else:
+                    private.setdefault(user_key, []).append(line)
+            # Spread requests out to avoid triggering rate limiting.
+            await asyncio.sleep(3 + random.random() * 3)
+
+        if groups and group_lines:
+            text = "森空岛自动签到结果\n" + "\n".join(group_lines)
+            for group in groups:
+                await self._notify(str(group.get("umo") or ""), text)
+            return
+
+        for user_key, lines in private.items():
+            umo = str((users.get(user_key) or {}).get("umo") or "")
+            if not umo:
+                continue
+            await self._notify(umo, "森空岛自动签到结果\n" + "\n".join(lines))
+
+    async def _sanity_poll_job(self) -> None:
+        """Notify subscribers whose sanity has just reached the cap.
+
+        Each subscriber is notified at most once per fill-up; the flag resets as
+        soon as sanity drops below the cap again.
+        """
+        for sub in await self.store.list_sanity_subs():
+            user_key = str(sub.get("user_key") or "")
+            umo = str(sub.get("umo") or "")
+            user = await self.store.get_user(user_key)
+            if not user or not umo:
+                continue
+            bindings = user.get("bindings") or []
+            binding = next(
+                (
+                    b
+                    for b in bindings
+                    if str(b.get("uid")) == str(user.get("primary_uid"))
+                ),
+                bindings[0] if bindings else None,
+            )
+            if not binding:
+                continue
+            try:
+                data = await self._player_data(user, binding)
+            except SklandError as exc:
+                logger.warning("[理智轮询] %s 查询失败: %s", user_key, exc)
+                continue
+
+            sanity = build_sanity_context(data)
+            if sanity["full"]:
+                if self._sanity_notified.get(user_key):
+                    continue
+                self._sanity_notified[user_key] = True
+                # A bare "sanity is full" says nothing in a group, so the role
+                # is named and the subscriber is mentioned.
+                nick = str(binding.get("nick_name") or "")
+                notice = (
+                    f"理智已回满（{sanity['current']} / {sanity['max']}），记得清体力。"
+                )
+                await self._notify(
+                    umo,
+                    f"{nick} 的{notice}" if nick else notice,
+                    mention=user_key if ":GroupMessage:" in umo else None,
+                )
+            else:
+                self._sanity_notified[user_key] = False
+            await asyncio.sleep(3 + random.random() * 3)
+
+    # ── operator queries ──────────────────────────────────────────────────
+
+    @filter.command("ark干员列表")
+    async def show_roster(self, event: AstrMessageEvent):
+        """Show the owned-operator roster card."""
+        resolved = await self._resolve_binding(event)
+        if not resolved:
+            yield event.plain_result(NO_BINDING_TEXT)
+            return
+        user, binding = resolved
+        try:
+            data = await self._player_data(user, binding)
+        except SklandError as exc:
+            yield event.plain_result(await self._report_query_error(event, exc))
+            return
+        char_info = data.get("charInfoMap") or {}
+        groups = group_operators(data.get("chars") or [], char_info)
+        roster = build_roster_context(groups, char_info)
+        image = await self._render("operator_list.html", {"roster": roster})
+        if image is None:
+            summary = "、".join(
+                f"{group['profession_cn']} {len(group['operators'])}"
+                for group in groups
+            )
+            yield event.plain_result(
+                f"已持有干员 {roster['owned']} / {roster['total']}。\n{summary}"
+            )
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @filter.command("ark干员", alias={"ark面板"})
+    async def show_operator(self, event: AstrMessageEvent):
+        """Show the detail card for one owned operator."""
+        args = self._args(event)
+        if not args:
+            yield event.plain_result(
+                "用法：ark干员 <干员名>\n"
+                "例如：ark干员 阿米娅\n"
+                "发送 `ark干员列表` 可查看已持有的干员。"
+            )
+            return
+        name = " ".join(args).strip()
+        resolved = await self._resolve_binding(event)
+        if not resolved:
+            yield event.plain_result(NO_BINDING_TEXT)
+            return
+        user, binding = resolved
+        try:
+            data = await self._player_data(user, binding)
+        except SklandError as exc:
+            yield event.plain_result(await self._report_query_error(event, exc))
+            return
+        operator = find_operator(
+            data.get("chars") or [], data.get("charInfoMap") or {}, name
+        )
+        if operator is None:
+            yield event.plain_result(
+                f"未找到干员「{name}」。发送 `ark干员列表` 可查看已持有的干员。"
+            )
+            return
+        context = build_operator_context(operator, data.get("equipmentInfoMap") or {})
+        image = await self._render("operator.html", {"op": context})
+        if image is None:
+            yield event.plain_result(self._operator_text(context))
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @staticmethod
+    def _operator_text(context: dict[str, Any]) -> str:
+        """Build the plain text fallback for the operator card.
+
+        Args:
+            context: Context produced by ``build_operator_context``.
+
+        Returns:
+            Multi-line summary text.
+        """
+        lines = [
+            f"{context['name']} {'★' * context['stars']} · {context['profession_cn']}",
+            f"等级 {context['level']} · 精英 {context['elite']} · "
+            f"潜能 {context['potential']} · 信赖 {context['favor']}%",
+        ]
+        if context["skills"]:
+            lines.append(
+                "技能："
+                + "、".join(
+                    f"{index} "
+                    + (
+                        f"专精{skill['specialize']}"
+                        if skill["specialize"]
+                        else "未专精"
+                    )
+                    for index, skill in enumerate(context["skills"], 1)
+                )
+            )
+        if context["equips"]:
+            lines.append(
+                "模组："
+                + "、".join(
+                    f"{equip['name']} Lv.{equip['level']}"
+                    for equip in context["equips"]
+                )
+            )
+        return "\n".join(lines)
+
+    # ── daily play ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _lines(pairs: list[tuple[str, str]]) -> str:
+        """Join label/value pairs into a plain text fallback block.
+
+        Args:
+            pairs: Label and value pairs.
+
+        Returns:
+            One line per pair.
+        """
+        return "\n".join(f"{label}：{value}" for label, value in pairs)
+
+    async def _daily_data(
+        self, event: AstrMessageEvent, *, include_rogue: bool = False
+    ):
+        """Resolve the caller's binding and fetch the player snapshot.
+
+        Args:
+            event: Incoming message event.
+
+        Yields:
+            A single-element tuple carrying either an error message or the data.
+        """
+        resolved = await self._resolve_binding(event)
+        if not resolved:
+            return None, NO_BINDING_TEXT
+        user, binding = resolved
+        try:
+            data = (
+                await self._player_data(user, binding, include_rogue=True)
+                if include_rogue
+                else await self._player_data(user, binding)
+            )
+        except SklandError as exc:
+            return None, await self._report_query_error(event, exc)
+        return data, None
+
+    @filter.command("ark基建")
+    async def show_building(self, event: AstrMessageEvent):
+        """Show the base (基建) card."""
+        data, error = await self._daily_data(event)
+        if error:
+            yield event.plain_result(error)
+            return
+        context = build_building_context(data)
+        image = await self._render("building.html", {"building": context})
+        if image is None:
+            yield event.plain_result(
+                self._lines(
+                    [
+                        (
+                            "无人机",
+                            f"{context['labor']['value']} / {context['labor']['max']}",
+                        ),
+                        (
+                            "线索",
+                            f"持有 {context['clue']['own']}，已收 {context['clue']['received']}",
+                        ),
+                        ("线索板", "、".join(context["clue"]["board"]) or "无"),
+                        (
+                            "设施",
+                            "、".join(
+                                f"{item['name']}{len(item['slots'])}"
+                                for item in context["facilities"]
+                            ),
+                        ),
+                    ]
+                )
+            )
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @filter.command("ark剿灭")
+    async def show_campaign(self, event: AstrMessageEvent):
+        """Show the annihilation (剿灭作战) card."""
+        data, error = await self._daily_data(event)
+        if error:
+            yield event.plain_result(error)
+            return
+        context = build_campaign_context(data)
+        image = await self._render("campaign.html", {"campaign": context})
+        if image is None:
+            yield event.plain_result(
+                self._lines(
+                    [
+                        (
+                            "本周合成玉",
+                            f"{context['reward']['current']} / {context['reward']['total']}",
+                        ),
+                        ("已满击杀", f"{context['cleared']} / {context['total']}"),
+                    ]
+                    + [
+                        (record["name"], f"{record['max_kills']} 杀")
+                        for record in context["records"]
+                    ]
+                )
+            )
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @filter.command("ark肉鸽")
+    async def show_rogue(self, event: AstrMessageEvent):
+        """Show the integrated-strategies (集成战略) card."""
+        data, error = await self._daily_data(event, include_rogue=True)
+        if error:
+            yield event.plain_result(error)
+            return
+        context = build_rogue_context(data)
+        image = await self._render("rogue.html", {"rogue": context})
+        if image is None:
+            yield event.plain_result(
+                self._lines(
+                    [
+                        (
+                            theme["name"]
+                            + " · 最高通关 "
+                            + (theme["highest_difficulty"] or "未提供"),
+                            f"累计节点 {theme['nodes'] if theme['nodes'] is not None else '未提供'} · 通关次数 {theme['clears'] if theme['clears'] is not None else '未提供'} · 收藏品 {theme['relics']} · 投资 {theme['bank']}",
+                        )
+                        for theme in context["themes"]
+                    ]
+                )
+                or "暂无集成战略记录"
+            )
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @filter.command("ark任务")
+    async def show_task(self, event: AstrMessageEvent):
+        """Show the routine (任务进度) card."""
+        data, error = await self._daily_data(event)
+        if error:
+            yield event.plain_result(error)
+            return
+        context = build_task_context(data)
+        image = await self._render("task.html", {"task": context})
+        if image is None:
+            yield event.plain_result(
+                self._lines(
+                    [
+                        (
+                            "每日任务",
+                            f"{context['daily']['current']} / {context['daily']['total']}",
+                        ),
+                        (
+                            "每周任务",
+                            f"{context['weekly']['current']} / {context['weekly']['total']}",
+                        ),
+                        (
+                            "剿灭合成玉",
+                            f"{context['campaign']['current']} / {context['campaign']['total']}",
+                        ),
+                        (
+                            "数据增补仪",
+                            f"{context['tower_lower']['current']} / {context['tower_lower']['total']}",
+                        ),
+                        (
+                            "数据增补条",
+                            f"{context['tower_higher']['current']} / {context['tower_higher']['total']}",
+                        ),
+                    ]
+                )
+            )
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @filter.command("ark公招")
+    async def show_recruit(self, event: AstrMessageEvent):
+        """Show the recruitment (公开招募) slot card."""
+        data, error = await self._daily_data(event)
+        if error:
+            yield event.plain_result(error)
+            return
+        context = build_recruit_context(data)
+        image = await self._render("recruit.html", {"recruit": context})
+        if image is None:
+            yield event.plain_result(
+                self._lines(
+                    [
+                        (
+                            f"栏位 {slot['index']}",
+                            slot["remaining_text"] or slot["state_cn"],
+                        )
+                        for slot in context["slots"]
+                    ]
+                )
+                or "没有读取到公开招募栏位"
+            )
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    # ── headhunting ───────────────────────────────────────────────────────
+
+    async def _gacha_records(self, event: AstrMessageEvent, force: bool = False):
+        """Load headhunting records for the caller's primary role.
+
+        Records are served from local storage while the sync is fresh, so
+        repeated queries cost nothing. A sync merges the fetched window into
+        the stored history rather than replacing it, which lets the history
+        grow past what the official endpoint still returns.
+
+        Args:
+            event: Incoming message event.
+            force: Skip the freshness check and sync now.
+
+        Returns:
+            Tuple of records, player data, sync state and an error message.
+            Records are empty when an error message is present.
+        """
+        resolved = await self._resolve_binding(event)
+        if not resolved:
+            return [], {}, {}, NO_BINDING_TEXT
+        user, binding = resolved
+        uid = str(binding.get("uid") or "")
+        token = str(user.get("token") or "")
+
+        cached = await self._gacha_store.load(uid)
+        ttl = max(0, int(self.config.get("gacha_cache_ttl", 21600) or 0))
+        fresh = cached["records"] and (time.time() - cached["synced_at"]) < ttl
+        if fresh and not force:
+            state = {
+                "synced_at": cached["synced_at"],
+                "stored_total": len(cached["records"]),
+                "just_synced": False,
+            }
+        else:
+            try:
+                await self._gamedata.ensure()
+                fetched = await self._gacha.fetch_records(token, uid)
+            except GachaError as exc:
+                if cached["records"]:
+                    # a failed refresh must not hide the history already held
+                    logger.warning("抽卡同步失败，改用本地记录: %s", exc)
+                    fetched = []
+                else:
+                    return [], {}, {}, f"抽卡记录获取失败：{exc}"
+            except Exception as exc:  # noqa: BLE001 - surface any chain failure
+                logger.error("抽卡记录获取异常: %s", exc)
+                if cached["records"]:
+                    fetched = []
+                else:
+                    return [], {}, {}, f"抽卡记录获取失败：{exc}"
+            merged = await self._gacha_store.merge(uid, fetched)
+            state = {
+                "synced_at": merged["synced_at"],
+                "stored_total": len(merged["records"]),
+                "just_synced": True,
+            }
+            cached = merged
+
+        try:
+            player = await self._player_data(user, binding)
+        except SklandError:
+            player = {}
+        return cached["records"], player, state, None
+
+    @filter.command("ark抽卡分析", alias={"ark抽卡分析同步", "ark抽卡同步"})
+    async def show_gacha(self, event: AstrMessageEvent):
+        """Show the headhunting analysis card."""
+        # CommandFilter only fires on an exact name or a name followed by a
+        # space, so "ark抽卡分析同步" needs its own alias; the intent is then read
+        # from the message rather than only from the parsed arguments.
+        raw = re.sub(r"\s+", "", event.message_str or "")
+        force = raw.endswith(("同步", "刷新", "sync")) or any(
+            str(arg) in {"同步", "刷新", "sync"} for arg in self._args(event)
+        )
+        records, player, state, error = await self._gacha_records(event, force=force)
+        if error:
+            yield event.plain_result(error)
+            return
+        if not records:
+            yield event.plain_result(
+                "没有获取到抽卡记录。\n"
+                "可能原因：该账号从未在官网同步过抽卡记录，或该角色没有抽卡数据。"
+            )
+            return
+        context = analyze(records, self._gamedata, player.get("charInfoMap") or {})
+        context["synced_text"] = format_record_time(state.get("synced_at"))
+        context["stored_total"] = state.get("stored_total", len(records))
+        context["just_synced"] = state.get("just_synced", False)
+        image = await self._render("gacha.html", {"gacha": context})
+        if image is None:
+            yield event.plain_result(self._gacha_text(context))
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @staticmethod
+    def _gacha_text(context: dict[str, Any]) -> str:
+        """Build the plain text fallback for the gacha card.
+
+        Args:
+            context: Context produced by ``analyze``.
+
+        Returns:
+            Multi-line summary text.
+        """
+        lines = [
+            f"总抽数 {context['total']} · 六星 {context['six_total']} "
+            f"· 五星 {context['five_total']}",
+            f"平均出六 {context['avg_six']} 抽 · 当前保底 {context['pity']} 抽",
+        ]
+        if context["up_known"]:
+            lines.append(f"UP {context['up_hits']} 次 · 歪 {context['off_rate']} 次")
+        lines.append(
+            "稀有度："
+            + "、".join(
+                f"{stars}★ {context['counts'][stars]}" for stars in (6, 5, 4, 3)
+            )
+        )
+        for item in context["six_stars"]:
+            lines.append(f"{item['name']}（{item['pulls']} 抽，{item['pool_name']}）")
+        return "\n".join(lines)
+
+    @filter.command("ark抽卡重置")
+    async def reset_gacha(self, event: AstrMessageEvent):
+        """Drop the locally stored headhunting history of the primary role."""
+        resolved = await self._resolve_binding(event)
+        if not resolved:
+            yield event.plain_result(NO_BINDING_TEXT)
+            return
+        _user, binding = resolved
+        uid = str(binding.get("uid") or "")
+        await self._gacha_store.clear(uid)
+        yield event.plain_result(
+            "已清空该角色在本机保存的抽卡记录。\n下次 `ark抽卡分析` 会重新从官网同步。"
+        )
+
+    @filter.command("ark抽卡记录")
+    async def show_gacha_records(self, event: AstrMessageEvent):
+        """List the most recent headhunting records as text."""
+        records, player, state, error = await self._gacha_records(event)
+        if error:
+            yield event.plain_result(error)
+            return
+        if not records:
+            yield event.plain_result("没有获取到抽卡记录。")
+            return
+        char_info = player.get("charInfoMap") or {}
+        lines = [
+            f"最近 {min(len(records), 15)} 条抽卡记录（本地共 {len(records)} 条）：",
+            f"同步时间 {format_record_time(state.get('synced_at'))}",
+            "",
+        ]
+        for record in records[:15]:
+            stars = max(3, min(6, int(record.get("rarity") or 2) + 1))
+            char_id = str(record.get("charId") or "")
+            name = str(record.get("charName") or "") or str(
+                (char_info.get(char_id) or {}).get("name") or char_id
+            )
+            pool = self._gamedata.pool_name(str(record.get("poolId") or ""))
+            stamp = format_record_time(record.get("gachaTs"))
+            lines.append(
+                f"{'★' * stars} {name} · {pool}" + (f" · {stamp}" if stamp else "")
+            )
+        yield event.plain_result("\n".join(lines))
+
+    # ── announcements ─────────────────────────────────────────────────────
+
+    async def _announce_records(self) -> list[dict[str, Any]]:
+        """Fetch the official announcement list.
+
+        Returns:
+            Announcements newest first.
+
+        Raises:
+            AnnounceError: When the feed is unreachable.
+        """
+        return await self._announce.fetch()
+
+    # ── 数据源选择、失败重试与降级 ────────────────────────────────────────
+
+    def _is_excluded(self, title: str) -> bool:
+        """Report whether a title matches the configured exclusion keywords.
+
+        Args:
+            title: Announcement title.
+
+        Returns:
+            ``True`` when the title contains any configured keyword.
+        """
+        raw = str(self.config.get("feed_exclude_keywords") or "")
+        keywords = [part.strip() for part in raw.split(",") if part.strip()]
+        if not keywords:
+            return False
+        return any(keyword in (title or "") for keyword in keywords)
+
+    def _filter_pushable(
+        self,
+        records: list[dict[str, Any]],
+        watermark: int,
+        now: float,
+        window: int,
+    ) -> list[dict[str, Any]]:
+        """Select the records worth pushing.
+
+        A record qualifies when it is newer than the watermark, falls inside the
+        age window, and is not excluded by keyword. Filtering happens here rather
+        than at the source so both sources behave identically.
+
+        Args:
+            records: Candidate records, newest first.
+            watermark: Newest timestamp already pushed.
+            now: Current unix time.
+            window: Maximum age in seconds.
+
+        Returns:
+            The records to push, newest first.
+        """
+        return [
+            item
+            for item in records
+            if int(item["ts"]) > watermark
+            and 0 < now - int(item["ts"]) <= window
+            and not self._is_excluded(str(item.get("title") or ""))
+        ]
+
+    def _feed_retry_delays(self) -> list[float]:
+        """Parse the retry schedule used after a self-hosted source failure.
+
+        Returns:
+            Delays in minutes, in order; empty when retries are disabled.
+        """
+        raw = str(self.config.get("feed_retry_delays") or "")
+        delays: list[float] = []
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                delays.append(max(0.0, float(part)))
+            except ValueError:
+                continue
+        return delays
+
+    async def _source_records(self) -> list[dict[str, Any]]:
+        """Fetch records from the active source.
+
+        The self-hosted source is preferred. A failed poll is retried on the
+        configured schedule, and only when every retry fails does the plugin
+        degrade to the website source and tell the subscribers. While degraded
+        it re-probes the self-hosted source on each poll and switches back as
+        soon as that source recovers.
+
+        Returns:
+            Records to push, newest first.
+
+        Raises:
+            AnnounceError: When the website source itself cannot be read.
+        """
+        configured = str(self.config.get("feed_source") or "selfhosted")
+        state = await self.store.feed_state()
+
+        if configured == "official":
+            return await self._announce_records()
+
+        if state["active"] == "official":
+            # Degraded: the probe is cheap and the payload is cached upstream, so
+            # it runs on every poll; any failure just keeps serving the website.
+            try:
+                records = await self._feed.fetch()
+            except FeedError:
+                return await self._announce_records()
+            if records and all(item.get("stale") for item in records):
+                return await self._announce_records()
+            await self.store.set_feed_active("")
+            await self._notify_feed_subscribers("自建公告源已恢复，推送切回自建源。")
+            return records
+
+        delays = self._feed_retry_delays()
+        last_error = "未知错误"
+        for attempt in range(len(delays) + 1):
+            try:
+                records = await self._feed.fetch()
+            except FeedError as exc:
+                last_error = str(exc)
+            else:
+                if not (records and all(item.get("stale") for item in records)):
+                    return records
+                last_error = "自建源数据过期"
+
+            if attempt < len(delays):
+                logger.warning(
+                    "[公告轮询] 自建源第 %d 次失败（%s），%.0f 分钟后重试",
+                    attempt + 1,
+                    last_error,
+                    delays[attempt],
+                )
+                await asyncio.sleep(delays[attempt] * 60)
+
+        # Every attempt failed: degrade, and say so exactly once.
+        await self.store.set_feed_active("official")
+        await self._notify_feed_subscribers(
+            f"自建公告源连续 {len(delays) + 1} 次获取失败，已自动降级到官网公告源。\n"
+            f"原因：{last_error}"
+        )
+        return await self._announce_records()
+
+    async def _list_for_command(self) -> list[dict[str, Any]]:
+        """List announcements for an interactive command.
+
+        Unlike the push job this never retries with delays — a user waiting on a
+        command must not be blocked for minutes — and it reads the same source
+        the pushes use, so the ids it matches are the ids the pushes announce.
+
+        Returns:
+            Records, newest first.
+
+        Raises:
+            FeedError: When the self-hosted source is unavailable.
+            AnnounceError: When the website source cannot be read.
+        """
+        configured = str(self.config.get("feed_source") or "selfhosted")
+        if configured == "official":
+            return await self._announce_records()
+        state = await self.store.feed_state()
+        if state["active"] == "official":
+            return await self._announce_records()
+        try:
+            records = await self._feed.fetch()
+        except FeedError:
+            return await self._announce_records()
+        if records and all(item.get("stale") for item in records):
+            return await self._announce_records()
+        return records
+
+    async def _notify_feed_subscribers(self, text: str) -> None:
+        """Send a source-status notice to every announcement subscriber.
+
+        Args:
+            text: Notice body.
+        """
+        for sub in await self.store.list_announce_subs():
+            umo = str(sub.get("umo") or "")
+            if umo:
+                await self._notify(umo, text)
+
+    async def _health_watch_job(self) -> None:
+        """Warn the operator privately when the self-hosted source goes bad.
+
+        The service keeps serving its last good payload when a refresh fails, so
+        a dead credential is invisible from the feed itself for up to
+        ``stale_minutes``. This probes the service's health endpoint instead and
+        reports to ``health_watch_umo`` once per incident, then confirms recovery
+        once. Empty ``health_watch_umo`` disables it.
+        """
+        umo = str(self.config.get("health_watch_umo") or "").strip()
+        if not umo:
+            return
+        if str(self.config.get("feed_source") or "selfhosted") == "official":
+            # The user pinned the website source; the self-hosted service is not
+            # on the delivery path, so its health is not worth waking them for.
+            return
+
+        try:
+            data = await self._feed.health()
+        except FeedError as exc:
+            self._health_failures += 1
+            if (
+                not self._health_alerted
+                and self._health_failures >= HEALTH_WATCH_FAILURES
+            ):
+                self._health_alerted = True
+                await self._notify(
+                    umo,
+                    f"⚠️ 自建公告源健康检查连续 {self._health_failures} 次失败：{exc}\n"
+                    "公告推送可能已在重试或降级到官网源。",
+                )
+            return
+
+        last_error = str(data.get("last_error") or "")
+        stale = bool(data.get("stale"))
+        if stale or last_error:
+            self._health_failures += 1
+            if not self._health_alerted and (
+                stale or self._health_failures >= HEALTH_WATCH_FAILURES
+            ):
+                self._health_alerted = True
+                await self._notify(
+                    umo,
+                    f"⚠️ 自建公告源异常：{last_error or '服务端缓存已过期，且长时间未能刷新'}\n"
+                    f"（已连续 {self._health_failures} 次检查异常。"
+                    "重跑 /opt/arksource/scripts/login.py 可恢复凭证。）",
+                )
+            return
+
+        self._health_failures = 0
+        if self._health_alerted:
+            self._health_alerted = False
+            await self._notify(umo, "✅ 自建公告源已恢复正常。")
+
+    @filter.command("ark公告")
+    async def show_announcements(self, event: AstrMessageEvent):
+        """List official announcements, or show one by id."""
+        args = self._args(event)
+        try:
+            records = await self._list_for_command()
+        except (AnnounceError, FeedError) as exc:
+            yield event.plain_result(f"公告获取失败：{exc}")
+            return
+        if not records:
+            yield event.plain_result("没有获取到官方公告。")
+            return
+
+        if args and args[0].lstrip("#").isdigit():
+            wanted = args[0].lstrip("#")
+            target = next((item for item in records if item["id"] == wanted), None)
+            if target is None:
+                yield event.plain_result(f"没有找到编号为 {wanted} 的公告。")
+                return
+            if target.get("body_html") is not None:
+                # Self-hosted ids are Skland post ids; the website detail route
+                # only knows its own numeric cids and would 404.
+                detail = {
+                    "cid": target["id"],
+                    "url": target.get("url", ""),
+                    "body_html": target["body_html"],
+                    "text": target.get("text", ""),
+                    "images": target.get("images", []),
+                    "image_total": target.get("image_total", 0),
+                }
+            else:
+                try:
+                    detail = await self._announce.fetch_detail(target["id"])
+                except AnnounceError as exc:
+                    yield event.plain_result(f"公告正文获取失败：{exc}")
+                    return
+            image, trimmed = await self._render_detail_card(
+                target,
+                detail,
+                f"（共 {len(detail.get('images') or [])} 张图，此处仅显示首图）",
+            )
+            # The card is a rendered image, so a URL painted inside it cannot be
+            # clicked. The original article link goes in the text instead.
+            link = str(target.get("url") or "")
+            if image is not None:
+                segments: list[Any] = []
+                if trimmed and link:
+                    segments.append(Plain(f"原文：{link}"))
+                segments.append(Image.fromFileSystem(str(image)))
+                yield event.chain_result(segments)
+                return
+            urls = [str(u) for u in (detail.get("images") or [])[:_MAX_FALLBACK_IMAGES]]
+            if urls:
+                segments = [Plain(f"原文：{link}")] if link else []
+                segments.append(Image.fromURL(urls[0]))
+                yield event.chain_result(segments)
+                for url in urls[1:]:
+                    yield event.chain_result([Image.fromURL(url)])
+                return
+            # text fallback keeps the announcement readable without a browser
+            yield event.plain_result(
+                f"[{target['group_cn']}] {target['title']}\n"
+                f"{target['date_text']} · 编号 {target['id']}"
+                + (
+                    f"\n（共 {detail['image_total']} 张配图）"
+                    if detail["image_total"]
+                    else ""
+                )
+                + f"\n\n{detail['text'][:1200]}"
+            )
+            return
+
+        items = list(records[:15])
+        # NOTE: the key must not be "items" — Jinja resolves announce.items to
+        # the dict's own .items method and the loop then fails.
+        context = {
+            "records": items,
+            "total": len(records),
+            "activity_count": sum(1 for r in records if r["group"] == "ACTIVITY"),
+            "system_count": sum(1 for r in records if r["group"] == "SYSTEM"),
+        }
+        image = await self._render("announce.html", {"announce": context})
+        if image is None:
+            yield event.plain_result(
+                self._lines(
+                    [
+                        (
+                            f"#{item['id']} [{item['group_cn']}] {item['title']}",
+                            item["date_text"],
+                        )
+                        for item in items
+                    ]
+                )
+            )
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @filter.command("ark订阅公告")
+    async def subscribe_announce(self, event: AstrMessageEvent):
+        """Enable new-announcement notifications for the caller's session."""
+        await self.store.set_announce_sub(
+            event.get_sender_id(), event.unified_msg_origin, True
+        )
+        minutes = max(15, int(self.config.get("announce_poll_interval", 30) or 30))
+        where = "本群" if not event.is_private_chat() else "私聊"
+        yield event.plain_result(
+            f"已订阅官方公告，每 {minutes} 分钟检查一次，有新公告会推送到{where}。\n"
+            "发送 `ark取消订阅公告` 可关闭。"
+        )
+
+    @filter.command("ark取消订阅公告")
+    async def unsubscribe_announce(self, event: AstrMessageEvent):
+        """Disable new-announcement notifications for the caller."""
+        await self.store.set_announce_sub(event.get_sender_id(), "", False)
+        yield event.plain_result("已取消公告订阅。")
+
+    async def _announce_poll_job(self) -> None:
+        """Push announcements published within the configured window.
+
+        Freshness is decided by a persisted timestamp watermark plus an age
+        window, not by a set of ids held in memory. A restart therefore neither
+        re-sends what already went out nor drops what arrived while the bot was
+        down, and an entry drifting across the feed boundary can never be
+        announced months late.
+        """
+        subs = await self.store.list_announce_subs()
+        if not subs:
+            return
+        try:
+            records = await self._source_records()
+        except AnnounceError as exc:
+            logger.warning("[公告轮询] 获取失败: %s", exc)
+            return
+        if not records:
+            return
+
+        now = time.time()
+        hours = max(1, int(self.config.get("announce_max_age_hours", 24) or 24))
+        window = hours * 3600
+        watermark = await self.store.announce_watermark()
+        newest = max((int(item["ts"]) for item in records), default=0)
+
+        if watermark == 0:
+            # First poll ever: adopt the current newest without pushing, so
+            # enabling the subscription does not replay the last day at once.
+            if newest:
+                await self.store.set_announce_watermark(newest)
+            logger.info(
+                "[公告轮询] 已初始化，当前 %d 条，水位线 %d", len(records), newest
+            )
+            return
+
+        # The window is what keeps an entry sitting on the edge of the feed from
+        # being announced months late; the watermark keeps a restart from
+        # re-sending what already went out.
+        fresh = self._filter_pushable(records, watermark, now, window)
+        if not fresh:
+            # Nothing went out, so nothing may move the watermark: advancing past
+            # an entry the filters held back (outside the age window, excluded by
+            # keyword, or future-dated) would drop it permanently.
+            return
+        # Only what was delivered may advance the watermark, and only as far as
+        # the newest delivered entry — never to `newest` of the whole listing.
+        await self.store.set_announce_watermark(max(int(item["ts"]) for item in fresh))
+
+        # Announcements are mostly artwork, so a title-only push buries the
+        # actual content. The first few are delivered as rendered cards (the
+        # same card `ark公告 <编号>` returns) and the rest stay a text list.
+        card_limit = max(0, int(self.config.get("announce_push_cards", 3) or 0))
+        cards: list[tuple[dict[str, Any], Path | None, bool]] = []
+        for item in fresh[:card_limit]:
+            # The self-hosted source ships the body with the record, so there is
+            # nothing to fetch; its ids are Skland post ids and would 404 against
+            # the website's detail route.
+            if item.get("body_html") is not None:
+                detail = {
+                    "cid": item["id"],
+                    "url": item.get("url", ""),
+                    "body_html": item["body_html"],
+                    "text": item.get("text", ""),
+                    "images": item.get("images", []),
+                    "image_total": item.get("image_total", 0),
+                }
+            else:
+                try:
+                    detail = await self._announce.fetch_detail(item["id"])
+                except AnnounceError as exc:
+                    logger.warning("[公告轮询] %s 正文获取失败: %s", item["id"], exc)
+                    cards.append((item, None, False))
+                    continue
+            image, trimmed = await self._render_detail_card(
+                item,
+                detail,
+                f"（共 {len(detail.get('images') or [])} 张图，"
+                "仅显示首图，完整内容见原文链接）",
+            )
+            cards.append((item, image, trimmed))
+
+        text = "官方新公告\n\n" + "\n\n".join(
+            f"[{item['group_cn']}] {item['title']}\n{item['date_text']}"
+            for item in fresh
+        )
+        rest = len(fresh) - len(cards)
+        if rest > 0:
+            text += f"\n\n……另有 {rest} 条，发送 `ark公告` 查看全部"
+
+        for sub in subs:
+            umo = str(sub.get("umo") or "")
+            if not umo:
+                continue
+            if not cards:
+                await self._notify(umo, text)
+                continue
+            await self._notify(umo, "官方新公告")
+            for item, image, trimmed in cards:
+                header = f"[{item['group_cn']}] {item['title']}\n{item['date_text']}"
+                link = str(item.get("url") or "")
+                if image is None and item.get("images"):
+                    # The card was too tall to be usable; the announcement is
+                    # image-driven, so deliver the artwork itself.
+                    urls = [str(u) for u in item["images"][:_MAX_FALLBACK_IMAGES]]
+                    total = len(item["images"])
+                    caption = header + f"\n（共 {total} 张，先发 {len(urls)} 张"
+                    if total > len(urls) and link:
+                        caption += "，其余见原文链接"
+                    caption += "）"
+                    if link:
+                        caption += f"\n原文：{link}"
+                    await self._notify(umo, caption, urls[0])
+                    for url in urls[1:]:
+                        await self._notify(umo, "", url)
+                    continue
+                if trimmed and link:
+                    # A rendered card cannot carry a clickable link, so the
+                    # original article URL has to travel as message text.
+                    header += f"\n原文：{link}"
+                await self._notify(umo, header, image)
+            if rest > 0:
+                await self._notify(umo, f"……另有 {rest} 条，发送 `ark公告` 查看全部")
+        logger.info(
+            "[公告轮询] 推送了 %d 条新公告（附带 %d 张卡片）", len(fresh), len(cards)
+        )
+
+    # ── 漏写唤醒前缀提醒 ───────────────────────────────────────────────────
+    # 群聊里指令必须带唤醒前缀（本部署为 ~）。用户漏写时 AstrBot 不会唤醒
+    # 事件，CommandFilter 因 is_at_or_wake_command 为假而全部跳过，于是消息
+    # 落到主管道被 LLM 答成"我没有这个功能"。这里在最后拦一刀并给出正确写法。
+    #
+    # 命令名不手写：扫描本模块已注册的 CommandFilter（含 alias），避免以后
+    # 新增指令后清单漂移。因此本处理器必须是类的最后一个方法。
+    _HINT_CMDS = tuple(
+        sorted(
+            {
+                _name
+                for _md in star_handlers_registry.get_handlers_by_event_type(
+                    EventType.AdapterMessageEvent, only_activated=False
+                )
+                if _md.handler_module_path == __name__
+                for _f in _md.event_filters
+                if isinstance(_f, CommandFilter)
+                for _name in (_f.command_name, *_f.alias)
+            }
+        )
+    )
+
+    @filter.regex(
+        r"^[/!！.。,，、]?\s*(?:"
+        + "|".join(re.escape(_c) for _c in _HINT_CMDS)
+        + r")(?:\s.*)?$"
+    )
+    async def missing_prefix_hint(self, event: AstrMessageEvent):
+        """Hint the correct wake prefix when a command is sent without it."""
+        raw = "".join(
+            seg.text for seg in event.get_messages() if isinstance(seg, Plain)
+        ).strip()
+        if raw.startswith(("~", "～")):
+            return  # 前缀正确，交给真正的指令处理器
+        # 被 @ 唤醒时用户没有漏写前缀，不能抢答
+        if event.is_at_or_wake_command:
+            return
+        if any(isinstance(seg, (At, AtAll, Reply)) for seg in event.get_messages()):
+            return
+        cmd = re.sub(r"^[/!！.。,，、]+", "", raw).strip()
+        cmd = re.split(r"\s+", cmd, maxsplit=1)[0]
+        if cmd not in self._HINT_CMDS:
+            return
+        # 拦下这条消息，避免被主管道 LLM 抢答
+        event.stop_event()
+        yield event.plain_result(
+            f"「{cmd}」要带唤醒前缀喵 (・_・?)\n"
+            f"本群的指令前面要加 ~ ，所以是：~{cmd}\n"
+            f"想不起来有哪些就发 ~ark帮助 看菜单"
+        )
