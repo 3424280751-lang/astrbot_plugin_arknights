@@ -1,0 +1,1577 @@
+"""Integration checks that require the AstrBot framework to be importable.
+
+Run this with the interpreter AstrBot itself runs with, pointing
+``ASTRBOT_ROOT`` at the AstrBot install (the one containing ``data/plugins``) so
+the framework resolves on the search path::
+
+    ASTRBOT_ROOT=/path/to/AstrBot python /path/to/astrbot_plugin_arknights/tests/integration_check.py
+
+The plugin itself is always imported from this checkout, whatever the AstrBot
+install happens to symlink into its ``data/plugins`` directory. ``ASTRBOT_ROOT``
+defaults to the current working directory and must contain ``data/plugins``.
+This exercises the real command handlers against stubbed network responses, so
+it covers command wiring, card building and image rendering together without
+needing an account.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import re
+import sys
+import tempfile
+import time
+import types
+from pathlib import Path
+from types import SimpleNamespace
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_NAME = "astrbot_plugin_arknights"
+ASTRBOT_ROOT = Path(os.environ.get("ASTRBOT_ROOT") or Path.cwd()).resolve()
+if not (ASTRBOT_ROOT / "data" / "plugins").is_dir():
+    raise SystemExit(
+        f"找不到 AstrBot 根目录（{ASTRBOT_ROOT} 下没有 data/plugins）。\n"
+        "请在 AstrBot 根目录运行本脚本，或设置 ASTRBOT_ROOT 环境变量。"
+    )
+sys.path.insert(0, str(PLUGIN_ROOT))
+sys.path.insert(0, str(ASTRBOT_ROOT))
+
+# `data.plugins.<name>` must resolve to THIS checkout, not to whatever the
+# AstrBot install symlinks there. Without this the script silently tests the
+# primary checkout's HEAD — a run can pass while the code under test is not the
+# code being changed. The bridge directory exists only because an importable
+# package must be named `astrbot_plugin_arknights`, while a worktree of this
+# repo is usually named something else.
+_ASTRBOT_PLUGINS = ASTRBOT_ROOT / "data" / "plugins"
+_BRIDGE = Path(tempfile.mkdtemp(prefix="ark-integration-"))
+(_BRIDGE / PLUGIN_NAME).symlink_to(PLUGIN_ROOT, target_is_directory=True)
+_data_pkg = types.ModuleType("data")
+_data_pkg.__path__ = []
+_plugins_pkg = types.ModuleType("data.plugins")
+_plugins_pkg.__path__ = [str(_BRIDGE), str(_ASTRBOT_PLUGINS)]
+sys.modules["data"] = _data_pkg
+sys.modules["data.plugins"] = _plugins_pkg
+
+import data.plugins.astrbot_plugin_arknights.main as plugin_module  # noqa: E402
+from astrbot.core.star.star_handler import star_handlers_registry  # noqa: E402
+
+from core.render import Renderer  # noqa: E402
+from core.skland import SignInResult  # noqa: E402
+from core.store import Store  # noqa: E402
+
+# Importing the plugin initialises AstrBot's logging, which installs a file sink
+# pointed at the live astrbot.log. This run loads the plugin with fixture config,
+# so lines such as the scheduler banner are indistinguishable from production
+# there — a "签到 03:30" banner from this file was once mistaken for the live
+# setting. Drop the sinks and keep reporting through stdout.
+try:
+    from loguru import logger as _loguru_logger
+
+    _loguru_logger.remove()
+except Exception:  # noqa: BLE001 - logging setup is best effort
+    pass
+
+NOW = time.time()
+
+OPERATORS = [
+    ("char_002_amiya", "阿米娅", 4, "CASTER", 90, 2, 5, 200),
+    ("char_003_kalts", "凯尔希", 5, "MEDIC", 90, 2, 4, 200),
+    ("char_1012_skadi2", "浊心斯卡蒂", 5, "WARRIOR", 90, 2, 3, 145),
+    ("char_009_12fce", "12F", 0, "CASTER", 40, 1, 3, 55),
+]
+CHAR_INFO = {
+    cid: {"name": name, "rarity": rarity, "profession": profession}
+    for cid, name, rarity, profession, *_ in OPERATORS
+}
+PLAYER = {
+    "status": {
+        "name": "探姬#9315",
+        "level": 71,
+        "registerTs": 1556736265,
+        "mainStageProgress": "st_09-01",
+        "storeTs": int(NOW) - 900,
+        "charCnt": 0,
+        "skinCnt": 0,
+        "ap": {"current": 88, "max": 135, "completeRecoveryTime": int(NOW) + 4200},
+    },
+    "chars": [
+        {
+            "charId": cid,
+            "level": level,
+            "evolvePhase": elite,
+            "potentialRank": potential,
+            "favorPercent": favor,
+            "defaultSkillId": "skchr_amiya_3",
+            "skills": [{"id": "skchr_amiya_3", "specializeLevel": 3}],
+            "equip": [{"id": "uniequip_002_amiya", "level": 1}],
+        }
+        for cid, _n, _r, _p, level, elite, potential, favor in OPERATORS
+    ],
+    "skins": [{"skinId": "s1"}],
+    "charInfoMap": CHAR_INFO,
+    "equipmentInfoMap": {"uniequip_002_amiya": {"name": "阿米娅证章"}},
+    "assistChars": [
+        {"charId": "char_002_amiya", "level": 90, "evolvePhase": 2},
+    ],
+    "routine": {
+        "daily": {"current": 10, "total": 10},
+        "weekly": {"current": 9, "total": 13},
+    },
+    "campaign": {"reward": {"current": 1200, "total": 1725}},
+}
+
+PLUGIN_DIR = Path(__file__).resolve().parents[1]
+
+EXPECTED_COMMANDS = {
+    "ark帮助",
+    "ark绑定",
+    "ark绑定列表",
+    "ark切换绑定",
+    "ark删除绑定",
+    "ark便签",
+    "ark理智",
+    "ark签到",
+    "ark订阅理智",
+    "ark取消订阅理智",
+    "ark订阅签到",
+    "ark取消订阅签到",
+    "ark干员列表",
+    "ark干员",
+    "ark面板",
+    "ark基建",
+    "ark剿灭",
+    "ark肉鸽",
+    "ark任务",
+    "ark公招",
+    "ark抽卡分析",
+    "ark抽卡记录",
+    "ark抽卡重置",
+    "ark公告",
+    "ark订阅公告",
+    "ark取消订阅公告",
+}
+
+# Commands registered by astrbot_plugin_endfield that must never be claimed by
+# this plugin, otherwise a single message would be handled by both plugins.
+ENDFIELD_COMMANDS = {
+    "zmd",
+    "便签",
+    "全服统计",
+    "公告",
+    "公告最新",
+    "切换绑定",
+    "删除绑定",
+    "危机合约",
+    "取消订阅公告",
+    "取消订阅理智",
+    "取消订阅调度券",
+    "同步面板",
+    "国际服登录",
+    "地区建设",
+    "帝江号建设",
+    "干员列表",
+    "成就列表",
+    "手机绑定",
+    "扫码绑定",
+    "抽卡分析",
+    "抽卡分析同步",
+    "抽卡记录",
+    "授权登陆",
+    "日历",
+    "理智",
+    "签到",
+    "绑定列表",
+    "订阅公告",
+    "订阅理智",
+    "订阅调度券",
+}
+
+failures: list[str] = []
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    status = "PASS" if condition else "FAIL"
+    print(f"[{status}] {name}{f' — {detail}' if detail else ''}")
+    if not condition:
+        failures.append(name)
+
+
+class StubEvent:
+    """Duck-typed stand-in for AstrMessageEvent covering the handlers' surface."""
+
+    def __init__(
+        self,
+        text: str,
+        sender: str = "10001",
+        private: bool = True,
+        at_or_wake: bool = False,
+        mentions: bool = False,
+    ) -> None:
+        self.message_str = text
+        self._sender = sender
+        self._private = private
+        # the origin has to follow the chat type, otherwise a group event would
+        # still look private to anything that keys off the session
+        self.unified_msg_origin = (
+            f"test:PrivateMessage:{sender}"
+            if private
+            else f"test:GroupMessage:{self.get_group_id()}"
+        )
+        self.is_at_or_wake_command = at_or_wake
+        self._mentions = mentions
+        self.stopped = False
+
+    def get_messages(self):
+        from astrbot.api.message_components import At, Plain
+
+        segments = [Plain(self.message_str)]
+        if self._mentions:
+            segments.insert(0, At(qq="10000"))
+        return segments
+
+    def stop_event(self) -> None:
+        self.stopped = True
+
+    def get_sender_id(self) -> str:
+        return self._sender
+
+    def is_private_chat(self) -> bool:
+        return self._private
+
+    def get_group_id(self) -> str:
+        return "" if self._private else "20002"
+
+    def get_platform_name(self) -> str:
+        return "test"
+
+    def plain_result(self, text: str):
+        return ("plain", text)
+
+    def chain_result(self, chain):
+        return ("chain", chain)
+
+
+def registered_commands() -> set[str]:
+    """Collect command names this plugin registered with AstrBot."""
+    names: set[str] = set()
+    for handler in star_handlers_registry._handlers:
+        if "astrbot_plugin_arknights" not in (handler.handler_module_path or ""):
+            continue
+        for event_filter in handler.event_filters:
+            command_name = getattr(event_filter, "command_name", None)
+            if command_name:
+                names.add(command_name)
+                names.update(getattr(event_filter, "alias", set()) or set())
+    return names
+
+
+def interceptor_regex(plugin_name: str, handler_name: str):
+    """Return a plugin's missing-prefix interceptor regex.
+
+    Args:
+        plugin_name: Plugin directory name, e.g. ``astrbot_plugin_arknights``.
+        handler_name: Handler method name.
+
+    Returns:
+        The compiled pattern, or ``None`` when the plugin has no such handler.
+    """
+    for handler in star_handlers_registry._handlers:
+        if plugin_name not in (handler.handler_module_path or ""):
+            continue
+        if handler.handler_name != handler_name:
+            continue
+        for event_filter in handler.event_filters:
+            pattern = getattr(event_filter, "regex", None)
+            if pattern is not None:
+                return pattern
+    return None
+
+
+def astrbot_detected_conflicts() -> dict[str, list[str]]:
+    """Ask AstrBot's own command manager which command names are claimed twice.
+
+    AstrBot ships a command management module that powers the dashboard's
+    conflict view. Its grouping helper needs no database, so it is reused here to
+    check this plugin against every other plugin loaded into the process.
+
+    Returns:
+        Mapping of duplicated command name to the plugins claiming it.
+    """
+    from astrbot.core.star.command_management import (  # noqa: PLC0415
+        _collect_descriptors,
+        _group_conflicts,
+    )
+
+    descriptors = _collect_descriptors(include_sub_commands=False)
+    return {
+        name: [desc.plugin_name for desc in group]
+        for name, group in _group_conflicts(descriptors).items()
+    }
+
+
+async def drive(agen) -> list:
+    """Collect the yielded results of a command handler."""
+    return [item async for item in agen]
+
+
+async def main() -> int:
+    check(
+        "plugin imports via data.plugins.<name>.main",
+        plugin_module.ArknightsPlugin.__name__ == "ArknightsPlugin",
+    )
+    import yaml as _yaml
+
+    _meta = _yaml.safe_load((PLUGIN_DIR / "metadata.yaml").read_text(encoding="utf-8"))
+    check(
+        "metadata version matches PLUGIN_VERSION",
+        str(_meta.get("version")) == str(plugin_module.PLUGIN_VERSION),
+        f"metadata {_meta.get('version')} vs code {plugin_module.PLUGIN_VERSION}",
+    )
+    # The README repeats the version in a badge and in the changelog, and both
+    # went stale when the version was bumped, so they are checked here too.
+    _readme = (PLUGIN_DIR / "README.md").read_text(encoding="utf-8")
+    _badge = re.search(r"badge/version-(\d+\.\d+\.\d+)-", _readme)
+    check(
+        "README badge version matches metadata",
+        _badge is not None and _badge.group(1) == str(_meta.get("version")),
+        f"badge {_badge.group(1) if _badge else '未找到'} vs metadata {_meta.get('version')}",
+    )
+    check(
+        "README changelog has an entry for the current version",
+        f"### {_meta.get('version')} " in _readme,
+        f"缺少 ### {_meta.get('version')} 章节",
+    )
+
+    # The dashboard reads a root-level changelog file, so the same version
+    # headings must exist there too; otherwise one of the two drifts on the
+    # next release and the dashboard shows a stale or empty history.
+    _changelog_path = PLUGIN_DIR / "CHANGELOG.md"
+    check("根目录有 CHANGELOG.md", _changelog_path.is_file(), str(_changelog_path))
+    if _changelog_path.is_file():
+        _cl_text = _changelog_path.read_text(encoding="utf-8")
+        _cl_headings = re.findall(r"^###\s+(\d+\.\d+\.\d+)", _cl_text, re.M)
+        check("CHANGELOG.md 至少有一个版本标题", bool(_cl_headings), _cl_headings[:3])
+        check(
+            "CHANGELOG.md 最新版本与插件版本一致",
+            bool(_cl_headings) and _cl_headings[0] == str(plugin_module.PLUGIN_VERSION),
+            f"changelog={_cl_headings[:1]} plugin={plugin_module.PLUGIN_VERSION!r}",
+        )
+
+    # The author is declared twice — metadata.yaml for the market and @register
+    # for the runtime — and they had drifted apart once already.
+    from astrbot.core.star.star import star_map as _star_map
+
+    _registered = _star_map.get(plugin_module.__name__)
+    check(
+        "registered author matches metadata.yaml",
+        _registered is not None and str(_registered.author) == str(_meta.get("author")),
+        f"register {getattr(_registered, 'author', None)} vs metadata {_meta.get('author')}",
+    )
+    for _field in ("display_name", "desc", "author", "repo"):
+        check(
+            f"metadata has {_field} for the plugin market",
+            bool(str(_meta.get(_field) or "").strip()),
+        )
+
+    check(
+        "metadata name matches plugin directory",
+        plugin_module.PLUGIN_NAME == "astrbot_plugin_arknights",
+    )
+
+    registered = registered_commands()
+    missing = EXPECTED_COMMANDS - registered
+    check(
+        "all expected commands registered",
+        not missing,
+        f"missing: {sorted(missing)}"
+        if missing
+        else f"{len(EXPECTED_COMMANDS)}/{len(EXPECTED_COMMANDS)}",
+    )
+
+    # The whole point of the ark prefix: a message must never be claimed by both
+    # this plugin and astrbot_plugin_endfield.
+    overlap = registered & ENDFIELD_COMMANDS
+    check(
+        "no command name collides with astrbot_plugin_endfield",
+        not overlap,
+        f"colliding: {sorted(overlap)}" if overlap else "0 collisions",
+    )
+
+    # Cross-check with AstrBot's own conflict detector, with the Endfield plugin
+    # loaded into the same process so the registry holds both plugins.
+    endfield_loaded = False
+    try:
+        import data.plugins.astrbot_plugin_endfield.main  # noqa: F401, PLC0415
+
+        endfield_loaded = True
+    except Exception as exc:  # noqa: BLE001 - the check degrades to a notice
+        print(f"[SKIP] astrbot_plugin_endfield 未加载，跳过交叉冲突检测: {exc}")
+
+    if endfield_loaded:
+        conflicts = astrbot_detected_conflicts()
+        mine = {
+            name: plugins
+            for name, plugins in conflicts.items()
+            if any("arknights" in (plugin or "") for plugin in plugins)
+        }
+        check(
+            "AstrBot 自带冲突检测未报告本插件冲突",
+            not mine,
+            f"冲突: {mine}" if mine else "0 conflicts",
+        )
+        others = {
+            name: plugins for name, plugins in conflicts.items() if name not in mine
+        }
+        print(
+            f"       （其他插件之间存在 {len(others)} 组冲突，与本插件无关"
+            + (f"：{sorted(others)}" if others else "")
+            + "）"
+        )
+
+    # ── 漏写前缀拦截器：只认自己的命令名，且不抢终末地的名字 ──
+    mine = plugin_module.ArknightsPlugin._HINT_CMDS
+    check(
+        "拦截器覆盖了全部本插件命令名",
+        set(EXPECTED_COMMANDS) <= set(mine),
+        f"{len(mine)} 个",
+    )
+    my_regex = interceptor_regex(PLUGIN_NAME, "missing_prefix_hint")
+    check("拦截器正则已注册", my_regex is not None)
+    if my_regex is not None:
+        unmatched = [name for name in mine if not my_regex.search(name)]
+        check(
+            "拦截器正则能匹配每一个本插件命令名",
+            not unmatched,
+            f"未匹配: {unmatched}" if unmatched else f"{len(mine)}/{len(mine)}",
+        )
+        stolen = [name for name in ENDFIELD_COMMANDS if my_regex.search(name)]
+        check(
+            "拦截器不会抢终末地的命令名",
+            not stolen,
+            f"抢到: {stolen}" if stolen else "0 conflicts",
+        )
+
+    if endfield_loaded:
+        their_regex = interceptor_regex(
+            "astrbot_plugin_endfield", "missing_prefix_hint"
+        )
+        if their_regex is not None:
+            hit = [name for name in mine if their_regex.search(name)]
+            check(
+                "终末地拦截器不会命中本插件的命令名",
+                not hit,
+                f"命中: {hit}" if hit else "0 hits",
+            )
+            # 反向：终末地自己的名字也不该被本插件抢
+            collide = [
+                name
+                for name in ("便签", "理智", "签到", "干员列表", "公告", "日历")
+                if my_regex is not None and my_regex.search(name)
+            ]
+            check(
+                "本插件拦截器不碰裸指令名",
+                not collide,
+                f"命中: {collide}" if collide else "0 hits",
+            )
+
+    # ── 拦截器行为：漏前缀给提示、带前缀与 @ 时让路 ──
+    hints = await drive(
+        plugin_module.ArknightsPlugin.missing_prefix_hint(
+            plugin_module.ArknightsPlugin,
+            StubEvent("ark理智"),
+        )
+    )
+    check(
+        "漏写 ~ 时给出提示并拦下消息",
+        hints and hints[0][0] == "plain" and "~ark理智" in hints[0][1],
+        hints[0][1].replace("\n", " | ") if hints else "no result",
+    )
+    for label, kwargs in (
+        ("带 ~ 前缀时让路", {"text": "~ark理智"}),
+        ("被 @ 唤醒时让路", {"text": "ark理智", "at_or_wake": True}),
+        ("消息含 @ 他人时让路", {"text": "ark理智", "mentions": True}),
+    ):
+        quiet = await drive(
+            plugin_module.ArknightsPlugin.missing_prefix_hint(
+                plugin_module.ArknightsPlugin, StubEvent(**kwargs)
+            )
+        )
+        check(f"拦截器{label}", not quiet, f"yielded {quiet}" if quiet else "silent")
+
+    # This plugin exercises the website source end to end (its `_announce` client
+    # is stubbed below), so pin the source to `official`; `_announce_poll_job`
+    # now routes through `_source_records`, which would otherwise need `_feed`.
+    plugin = plugin_module.ArknightsPlugin(
+        context=SimpleNamespace(send_message=None), config={"feed_source": "official"}
+    )
+    plugin.store = Store(Path("/tmp/ak-integration/users.json"))
+    plugin.store.path.unlink(missing_ok=True)
+    renderer = Renderer(
+        PLUGIN_ROOT / "templates", Path("/tmp/ak-integration/cache"), 30000
+    )
+    plugin._renderer = renderer
+
+    # ── 公告：列表出图、按编号看正文、失败给出明确提示 ──
+    ANNOUNCE_FIXTURE = [
+        {
+            "id": "7367",
+            "title": "[明日方舟]09月11日16:00闪断更新公告",
+            "author": "【明日方舟】运营组",
+            "brief": "计划将于09月11日进行服务器闪断更新。",
+            "group": "SYSTEM",
+            "group_cn": "系统",
+            "url": "https://ak.hypergryph.com/news/7367",
+            "ts": 1789095600,
+            "date_text": "2026-09-11 11:00",
+        },
+        {
+            "id": "9681",
+            "title": "[活动预告]「月行水上」限时活动即将开启",
+            "author": "【明日方舟】运营组",
+            "brief": "活动期间将开放活动关卡。",
+            "group": "ACTIVITY",
+            "group_cn": "活动",
+            "url": "https://ak.hypergryph.com/news/9681",
+            "ts": 1787900000,
+            "date_text": "2026-08-29 11:00",
+        },
+    ]
+
+    async def fake_announce():
+        return ANNOUNCE_FIXTURE
+
+    async def fake_detail(cid):
+        return {
+            "cid": cid,
+            "url": f"https://ak.hypergryph.com/news/{cid}",
+            "body_html": "<p>公告<b>正文</b>摘要</p>",
+            "text": "公告正文摘要",
+            "images": ["https://example.invalid/a.jpg"],
+            "image_total": 1,
+        }
+
+    plugin._announce.fetch = fake_announce
+    plugin._announce.fetch_detail = fake_detail
+
+    results = await drive(plugin.show_announcements(StubEvent("/ark公告")))
+    check(
+        "ark公告 renders a card",
+        results and results[0][0] == "chain" and Path(results[0][1][0].path).is_file(),
+    )
+
+    results = await drive(plugin.show_announcements(StubEvent("/ark公告 7367")))
+    check(
+        "ark公告 <编号> renders the body card",
+        results and results[0][0] == "chain" and Path(results[0][1][0].path).is_file(),
+    )
+
+    results = await drive(plugin.show_announcements(StubEvent("/ark公告 9999")))
+    check(
+        "ark公告 with an unknown id says so",
+        results and "没有找到" in results[0][1],
+    )
+
+    async def failing_announce():
+        # must be the class the plugin itself catches: the harness imports
+        # ``core.announce`` on a separate path from the plugin's own
+        # ``.core.announce``, and the two are distinct class objects.
+        raise plugin_module.AnnounceError("网络不可用")
+
+    plugin._announce.fetch = failing_announce
+    results = await drive(plugin.show_announcements(StubEvent("/ark公告")))
+    check(
+        "ark公告 reports a feed failure",
+        results and "公告获取失败" in results[0][1],
+    )
+    plugin._announce.fetch = fake_announce
+
+    results = await drive(plugin.subscribe_announce(StubEvent("/ark订阅公告")))
+    check(
+        "ark订阅公告 confirms in private",
+        results and "已订阅" in results[0][1],
+    )
+    results = await drive(
+        plugin.subscribe_announce(StubEvent("/ark订阅公告", private=False))
+    )
+    check(
+        "ark订阅公告 also works in a group and targets that group",
+        results and "本群" in results[0][1],
+    )
+    subs = await plugin.store.list_announce_subs()
+    check("公告订阅已落库", len(subs) == 1, f"{subs}")
+    check(
+        "群聊订阅记录的是群会话",
+        subs and "Group" in str(subs[0].get("umo")),
+        f"{subs[0].get('umo') if subs else ''}",
+    )
+
+    check(
+        "群聊扫码会附带凭证警告",
+        "GROUP_QR_WARNING" in dir(plugin_module)
+        and "群聊中扫码请注意" in plugin_module.GROUP_QR_WARNING,
+    )
+
+    await plugin.unsubscribe_announce(StubEvent("/ark取消订阅公告")).__anext__()
+
+    # The subscription push used to deliver titles only, which buried the
+    # artwork that announcements mostly consist of.
+    sent: list[list[str]] = []
+
+    async def capture(umo, chain):
+        # keep the segments themselves, not just their type names, so the
+        # text of each message can be asserted on
+        sent.append(list(chain.chain))
+
+    # the anchor above cancelled the subscription, so re-arm it first
+    await plugin.subscribe_announce(StubEvent("/ark订阅公告")).__anext__()
+    plugin.context = SimpleNamespace(send_message=capture)
+    recent = int(time.time()) - 3600  # one hour ago, inside the default window
+
+    def announcement(ident, ts, title):
+        return {
+            "id": ident,
+            "title": title,
+            "author": "【明日方舟】运营组",
+            "brief": "活动期间将开放活动关卡。",
+            "group": "ACTIVITY",
+            "group_cn": "活动",
+            "url": f"https://ak.hypergryph.com/news/{ident}",
+            "ts": ts,
+            "date_text": "2026-10-09 12:00",
+        }
+
+    # Prime with a feed whose newest entry is ten days old. The watermark then
+    # starts *behind* the stale entry below, so the age window — not the
+    # watermark — is what has to stop it.
+    async def announce_stale_only():
+        return [announcement("7777", int(time.time()) - 240 * 3600, "[旧] 十天前")]
+
+    plugin._announce.fetch = announce_stale_only
+    await plugin._announce_poll_job()
+    check("公告轮询首轮只登记不推送", sent == [], f"{sent}")
+    check(
+        "首轮写入了水位线",
+        await plugin.store.announce_watermark() > 0,
+        f"{await plugin.store.announce_watermark()}",
+    )
+
+    # Simulates coming back after downtime: one entry published while the bot
+    # was down (newer than the watermark but well outside the window) and one
+    # published just now. Only the fresh one may go out.
+    async def announce_with_new():
+        return [
+            announcement(
+                "8888", int(time.time()) - 120 * 3600, "[旧] 停机期间的旧公告"
+            ),
+            announcement("9999", recent, "[活动预告] 新活动即将开启"),
+        ]
+
+    plugin._announce.fetch = announce_with_new
+    await plugin._announce_poll_job()
+    segments = [type(segment).__name__ for group in sent for segment in group]
+    check("公告推送带上了详情卡图片", "Image" in segments, f"{segments}")
+    check(
+        "公告推送先发一条汇总文本",
+        bool(sent) and type(sent[0][0]).__name__ == "Plain",
+        f"{segments}",
+    )
+    pushed_text = " ".join(
+        str(getattr(segment, "text", "")) for group in sent for segment in group
+    )
+    check(
+        "超出时间窗口的旧公告不会被推送",
+        "停机期间" not in pushed_text and "新活动" in pushed_text,
+        pushed_text[:160],
+    )
+
+    # The watermark is persisted, so polling again re-sends nothing.
+    sent.clear()
+    await plugin._announce_poll_job()
+    check("同一公告不会重复推送", sent == [], f"{sent}")
+
+    # leave the store as the following check expects it
+    await plugin.unsubscribe_announce(StubEvent("/ark取消订阅公告")).__anext__()
+    check("公告订阅可取消", not await plugin.store.list_announce_subs())
+
+    # ── 水位线只随实际推送的条目推进 ──────────────────────────────────────
+    async def poll_watermark(records, watermark, exclude=""):
+        """Drive one announce poll against a fixed feed and return the outcome.
+
+        Args:
+            records: Records the website source returns, newest first.
+            watermark: Watermark to seed before the poll.
+            exclude: Comma-separated ``feed_exclude_keywords`` for this poll.
+
+        Returns:
+            The ``(watermark, pushed_text)`` pair after the poll completes.
+        """
+        pushed: list[list[str]] = []
+
+        async def capture_poll(umo, chain):
+            pushed.append(list(chain.chain))
+
+        polled = plugin_module.ArknightsPlugin(
+            context=SimpleNamespace(send_message=capture_poll),
+            config={"feed_source": "official", "feed_exclude_keywords": exclude},
+        )
+        polled.store = Store(Path("/tmp/ak-integration/users.json"))
+        polled.store.path.unlink(missing_ok=True)
+        await polled.store.set_announce_sub("10001", "test:PrivateMessage:10001", True)
+        await polled.store.set_announce_watermark(watermark)
+
+        async def feed():
+            return list(records)
+
+        async def detail(cid):
+            return {
+                "cid": cid,
+                "url": f"https://ak.hypergryph.com/news/{cid}",
+                "body_html": "<p>正文</p>",
+                "text": "正文",
+                "images": [],
+                "image_total": 0,
+            }
+
+        async def render(template, data):
+            return None
+
+        polled._announce.fetch = feed
+        polled._announce.fetch_detail = detail
+        polled._render = render
+        await polled._announce_poll_job()
+        text = " ".join(
+            str(getattr(segment, "text", "")) for group in pushed for segment in group
+        )
+        return await polled.store.announce_watermark(), text
+
+    now_ts = int(time.time())
+
+    # Nothing pushable: a record outside the age window must not move the
+    # watermark (the old code advanced it to `newest` and dropped it forever).
+    stale_wm = now_ts - 100 * 3600
+    stale_ts = now_ts - 42 * 3600
+    wm1, text1 = await poll_watermark(
+        [announcement("9101", stale_ts, "[旧] 42 小时前的公告")], stale_wm
+    )
+    check("无推内容时水位线不动", wm1 == stale_wm, f"wm={wm1} expected={stale_wm}")
+    check("无推内容时不发任何消息", text1 == "", text1[:120])
+
+    # Only the pushed item advances the watermark: an excluded newer record must
+    # not drag the watermark past the pushed older one.
+    pushed_ts = now_ts - 1800
+    excluded_ts = now_ts - 60
+    wm2, text2 = await poll_watermark(
+        [
+            announcement(
+                "9103", excluded_ts, "[签到福利] 森空岛10月签到福利活动开启！"
+            ),
+            announcement("9102", pushed_ts, "[活动预告] 新活动即将开启"),
+        ],
+        now_ts - 3600,
+        exclude="签到福利",
+    )
+    check(
+        "水位线只推进到实际推送的条目",
+        wm2 == pushed_ts,
+        f"wm={wm2} expected={pushed_ts}",
+    )
+    check("被排除的更新条目不会拖高水位线", wm2 != excluded_ts, f"wm={wm2}")
+    check(
+        "推送的正是未命中关键词的条目",
+        "新活动" in text2 and "签到福利" not in text2,
+        text2[:160],
+    )
+
+    # A future-dated record cannot poison the watermark: it is the newest but is
+    # never "fresh", so the old code would jump the watermark past every real
+    # announcement and keep it there.
+    normal_ts = now_ts - 1800
+    future_ts = now_ts + 86400
+    wm3, text3 = await poll_watermark(
+        [
+            announcement("9105", future_ts, "[未来] 来自未来的公告"),
+            announcement("9104", normal_ts, "[活动预告] 正常的新公告"),
+        ],
+        now_ts - 3600,
+    )
+    check(
+        "未来时间戳不会毒化水位线",
+        wm3 == normal_ts,
+        f"wm={wm3} expected={normal_ts}",
+    )
+    check(
+        "未来时间戳的公告被忽略",
+        "未来" not in text3 and "正常的新公告" in text3,
+        text3[:160],
+    )
+
+    # The watermark now sits at the normal record, so the next poll must not
+    # re-deliver it.
+    wm3b, text3b = await poll_watermark(
+        [
+            announcement("9105", future_ts, "[未来] 来自未来的公告"),
+            announcement("9104", normal_ts, "[活动预告] 正常的新公告"),
+        ],
+        wm3,
+    )
+    check("未来条目被忽略后不会重复推送", text3b == "", text3b[:160])
+    check(
+        "重轮询后水位线保持不变", wm3b == normal_ts, f"wm={wm3b} expected={normal_ts}"
+    )
+
+    # ── 超长公告：整卡渲染失败时只保留首图重渲染一次 ──
+    sent.clear()
+
+    def artwork_record(ident, image_count, url=""):
+        images = [
+            f"https://example.invalid/{ident}-{i}.jpg" for i in range(image_count)
+        ]
+        return {
+            "id": ident,
+            "title": "「朝陇山」余量上架",
+            "author": "明日方舟",
+            "brief": "",
+            "group": "OFFICIAL",
+            "group_cn": "官方",
+            "url": url,
+            "ts": int(time.time()) - 60,
+            "date_text": "2026-10-19 12:00",
+            "text": "第一段正文",
+            "images": images,
+            "image_total": image_count,
+            "body_html": plugin_module._body_html("第一段正文", images),
+        }
+
+    rendered: list[dict] = []
+
+    async def fail_once_then_cover(template, data):
+        # The first render pretends the full card is too tall to deliver; the
+        # retry must be a cover-only rebuild of body_html.
+        rendered.append(data)
+        return Path("/tmp/ark-integration/cover.png") if len(rendered) == 2 else None
+
+    async def poll_with(record, render):
+        cover_plugin = plugin_module.ArknightsPlugin(
+            context=SimpleNamespace(send_message=capture),
+            config={"feed_source": "official"},
+        )
+        cover_plugin.store = Store(Path("/tmp/ak-integration/users.json"))
+        cover_plugin.store.path.unlink(missing_ok=True)
+        await cover_plugin.store.set_announce_sub(
+            "2260442041", "coe:GroupMessage:454206542", True
+        )
+        await cover_plugin.store.set_announce_watermark(int(time.time()) - 7200)
+
+        async def fake_feed():
+            return [record]
+
+        cover_plugin._announce.fetch = fake_feed
+        cover_plugin._render = render
+        await cover_plugin._announce_poll_job()
+
+    rendered.clear()
+    await poll_with(artwork_record("6389248", 9), fail_once_then_cover)
+    check(
+        "超长公告整卡渲染失败后重渲染一次", len(rendered) == 2, f"{len(rendered)} calls"
+    )
+    check(
+        "重渲染的 body_html 恰好保留 1 张图",
+        len(rendered) == 2 and rendered[1]["announce"]["body_html"].count("<img") == 1,
+        rendered[1]["announce"]["body_html"] if len(rendered) == 2 else "no retry",
+    )
+
+    # A card is a rendered image, so the original article link can only reach
+    # the reader as message text. A trimmed card must carry it there, otherwise
+    # the other images are unreachable from the bot.
+    rendered.clear()
+    sent.clear()
+    article_url = "https://www.skland.com/article?id=6389248"
+    await poll_with(artwork_record("6389248", 9, article_url), fail_once_then_cover)
+    pushed_link_text = " ".join(
+        str(getattr(seg, "text", "")) for grp in sent for seg in grp
+    )
+    check(
+        "首图卡片的推送文本包含原文链接",
+        article_url in pushed_link_text,
+        pushed_link_text[:160],
+    )
+
+    # A single image needs no retry: the first failure falls through to the
+    # artwork fallback instead of rebuilding an identical one-image card.
+    rendered.clear()
+    await poll_with(artwork_record("6389249", 1), fail_once_then_cover)
+    check("单图公告不触发首图重渲染", len(rendered) == 1, f"{len(rendered)} calls")
+
+    # ── 自建源：正常、重试、降级、恢复 ────────────────────────────────────
+    SELF_TS = int(time.time()) - 60
+
+    def selfhosted(ident, ts, title, kind=1):
+        return {
+            "id": ident,
+            "title": title,
+            "author": "明日方舟",
+            "brief": "",
+            "group": "OFFICIAL",
+            "group_cn": "官方",
+            "url": "",
+            "ts": ts,
+            "date_text": "2026-10-12 11:00",
+            "text": "",
+            "images": [],
+            "image_total": 0,
+            "body_html": "",
+            "kind": kind,
+            "cover": "",
+            "stale": False,
+        }
+
+    SELF_RECORDS = [
+        selfhosted("6377378", SELF_TS, "《明日方舟》「书行山海」特别公益PV")
+    ]
+    SITE_RECORDS = [announcement("9999", SELF_TS, "[活动预告] 新活动即将开启")]
+
+    class FakeFeed:
+        """FeedClient stand-in that fails its first ``fail_times`` calls."""
+
+        def __init__(self, records, fail_times=0, stale=False):
+            self.records = [{**record, "stale": stale} for record in records]
+            self.fail_times = fail_times
+            self.calls = 0
+
+        async def fetch(self):
+            self.calls += 1
+            if self.calls <= self.fail_times:
+                # Must be the class the plugin itself catches: the harness imports
+                # ``core.feed`` on a separate path from the plugin's own
+                # ``.core.feed``, and the two are distinct class objects.
+                raise plugin_module.FeedError("连接超时")
+            return list(self.records)
+
+        async def close(self):
+            return None
+
+    def make_source_plugin(feed, config=None, announce_records=None):
+        """Build a plugin wired to the fake feed and an optional fake website."""
+        built = plugin_module.ArknightsPlugin(
+            context=SimpleNamespace(send_message=capture), config=config or {}
+        )
+        built.store = Store(Path("/tmp/ak-integration/users.json"))
+        built.store.path.unlink(missing_ok=True)
+        built._feed = feed
+        if announce_records is not None:
+
+            async def fake_site():
+                return list(announce_records)
+
+            built._announce.fetch = fake_site
+        return built
+
+    # ── ark公告 <编号>：自建源记录不走官网详情接口 ──
+    detail_calls: list[str] = []
+
+    async def recording_fetch_detail(cid):
+        detail_calls.append(cid)
+        return {
+            "cid": cid,
+            "url": f"https://ak.hypergryph.com/news/{cid}",
+            "body_html": "<p>官网正文</p>",
+            "text": "官网正文",
+            "images": ["https://example.invalid/site.jpg"],
+            "image_total": 1,
+        }
+
+    # The command lists through `_list_for_command`, which reads `_feed` — the
+    # self-hosted client — when `feed_source` is selfhosted. That is the same
+    # source the pushes announce, so the id the caption tells users to run
+    # resolves here without touching the website detail route.
+    cmd_plugin = make_source_plugin(
+        FakeFeed([artwork_record("6389248", 1)]),
+        {"feed_source": "selfhosted"},
+    )
+    cmd_plugin._renderer = renderer
+    cmd_plugin._announce.fetch_detail = recording_fetch_detail
+
+    cmd_results = await drive(
+        cmd_plugin.show_announcements(StubEvent("/ark公告 6389248"))
+    )
+    check(
+        "自建源编号查详情不调用官网 fetch_detail",
+        detail_calls == [],
+        f"{detail_calls}",
+    )
+    check(
+        "自建源编号查详情渲染出卡片",
+        bool(cmd_results)
+        and cmd_results[0][0] == "chain"
+        and Path(cmd_results[0][1][0].path).is_file(),
+        f"{[result[0] for result in cmd_results]}",
+    )
+
+    # The command must apply the same cover-only retry the push uses. Running
+    # `ark公告 <编号>` against a too-tall card has to render twice (full card,
+    # then cover) and hand over a single card image — it must never fall through
+    # to the per-image artwork fallback when the cover card succeeds.
+    rendered.clear()
+    cover_cmd_plugin = make_source_plugin(
+        FakeFeed([artwork_record("6389248", 9)]),
+        {"feed_source": "selfhosted"},
+    )
+    cover_cmd_plugin._render = fail_once_then_cover
+    cover_cmd_results = await drive(
+        cover_cmd_plugin.show_announcements(StubEvent("/ark公告 6389248"))
+    )
+    check(
+        "命令查详情整卡渲染失败后重渲染一次",
+        len(rendered) == 2,
+        f"{len(rendered)} calls",
+    )
+    check(
+        "命令重渲染的 body_html 恰好保留 1 张图",
+        len(rendered) == 2 and rendered[1]["announce"]["body_html"].count("<img") == 1,
+        rendered[1]["announce"]["body_html"] if len(rendered) == 2 else "no retry",
+    )
+    cover_cmd_images = [
+        seg
+        for result in cover_cmd_results
+        if result[0] == "chain"
+        for seg in result[1]
+        if type(seg).__name__ == "Image"
+    ]
+    check(
+        "命令封面卡成功时只发一张卡、不回退逐图发送",
+        len(cover_cmd_results) == 1
+        and len(cover_cmd_images) == 1
+        and bool(getattr(cover_cmd_images[0], "path", "")),
+        f"results={[result[0] for result in cover_cmd_results]} "
+        f"images={len(cover_cmd_images)}",
+    )
+
+    # `feed_source: official` must pin the command to the website list, never
+    # the self-hosted feed, so the fallback the pushes rely on still resolves
+    # the ids the pushes announce.
+    site_feeder = FakeFeed([artwork_record("6389248", 1)])
+    site_plugin = make_source_plugin(
+        site_feeder,
+        {"feed_source": "official"},
+        announce_records=[announcement("7367", recent, "[活动预告] 新活动即将开启")],
+    )
+    site_plugin._renderer = renderer
+    site_plugin._announce.fetch_detail = recording_fetch_detail
+    site_results = await drive(
+        site_plugin.show_announcements(StubEvent("/ark公告 7367"))
+    )
+    check(
+        "feed_source=official 时命令走官网列表",
+        bool(site_results)
+        and site_results[0][0] == "chain"
+        and Path(site_results[0][1][0].path).is_file(),
+        f"{[result[0] for result in site_results]}",
+    )
+    check(
+        "feed_source=official 时命令不请求自建源",
+        site_feeder.calls == 0,
+        site_feeder.calls,
+    )
+
+    def alert_text():
+        return " ".join(str(getattr(seg, "text", "")) for grp in sent for seg in grp)
+
+    # 1) 自建源正常：用它，不降级
+    sent.clear()
+    feeder = FakeFeed(SELF_RECORDS)
+    plugin = make_source_plugin(
+        feeder, {"feed_source": "selfhosted", "feed_retry_delays": "0"}
+    )
+    records = await plugin._source_records()
+    check("自建源正常时使用自建源", [r["id"] for r in records] == ["6377378"], records)
+    check(
+        "自建源正常时不降级",
+        (await plugin.store.feed_state())["active"] == "",
+        await plugin.store.feed_state(),
+    )
+
+    # 2) 首次失败、重试成功：不降级、不告警
+    sent.clear()
+    feeder = FakeFeed(SELF_RECORDS, fail_times=1)
+    plugin = make_source_plugin(
+        feeder, {"feed_source": "selfhosted", "feed_retry_delays": "0"}
+    )
+    records = await plugin._source_records()
+    check("重试成功后仍用自建源", [r["id"] for r in records] == ["6377378"], records)
+    check(
+        "重试成功不降级",
+        (await plugin.store.feed_state())["active"] == "",
+        await plugin.store.feed_state(),
+    )
+    check("确实发生了一次重试", feeder.calls == 2, feeder.calls)
+    check("重试成功不发告警", sent == [], f"{sent}")
+
+    # 3) 重试全部失败：降级 + 告警 + 回落到官网源
+    sent.clear()
+    feeder = FakeFeed(SELF_RECORDS, fail_times=99)
+    plugin = make_source_plugin(
+        feeder,
+        {"feed_source": "selfhosted", "feed_retry_delays": "0,0"},
+        announce_records=SITE_RECORDS,
+    )
+    await plugin.store.set_announce_sub(
+        "2260442041", "coe:GroupMessage:454206542", True
+    )
+    records = await plugin._source_records()
+    check(
+        "重试全部失败后降级到官网源",
+        (await plugin.store.feed_state())["active"] == "official",
+        await plugin.store.feed_state(),
+    )
+    check("降级后返回官网源记录", [r["id"] for r in records] == ["9999"], records)
+    check("尝试次数 = 首发 1 次 + 重试 2 次", feeder.calls == 3, feeder.calls)
+    check("降级向订阅者发出了告警", "降级" in alert_text(), alert_text()[:200])
+
+    # 4) 已降级时自建源恢复：切回并通知
+    sent.clear()
+    feeder = FakeFeed(SELF_RECORDS)
+    plugin = make_source_plugin(
+        feeder, {"feed_source": "selfhosted", "feed_retry_delays": "0"}
+    )
+    await plugin.store.set_feed_active("official")
+    await plugin.store.set_announce_sub(
+        "2260442041", "coe:GroupMessage:454206542", True
+    )
+    records = await plugin._source_records()
+    check(
+        "恢复后切回自建源",
+        (await plugin.store.feed_state())["active"] == "",
+        await plugin.store.feed_state(),
+    )
+    check("恢复后返回自建源记录", [r["id"] for r in records] == ["6377378"], records)
+    check("恢复发出了通知", "恢复" in alert_text(), alert_text()[:200])
+
+    # 5) 配置为 official 时完全不碰自建源
+    sent.clear()
+    feeder = FakeFeed(SELF_RECORDS)
+    plugin = make_source_plugin(
+        feeder, {"feed_source": "official"}, announce_records=SITE_RECORDS
+    )
+    records = await plugin._source_records()
+    check(
+        "feed_source=official 时直接用官网源",
+        [r["id"] for r in records] == ["9999"],
+        records,
+    )
+    check("feed_source=official 时不请求自建源", feeder.calls == 0, feeder.calls)
+
+    # ── 排除过滤：命中关键词的条目不推送，但水位线仍按全部条目推进 ────────
+    FILTER_TS = int(time.time())
+
+    def filter_fixture(ident, title, ts):
+        return {
+            "id": ident,
+            "title": title,
+            "author": "明日方舟",
+            "brief": "",
+            "group": "OFFICIAL",
+            "group_cn": "官方",
+            "url": "",
+            "ts": ts,
+            "date_text": "2026-10-12 11:00",
+        }
+
+    filter_records = [
+        filter_fixture("1", "【签到福利】森空岛10月签到福利活动开启！", FILTER_TS - 60),
+        filter_fixture("2", "《明日方舟》EP - 大地之盐", FILTER_TS - 30),
+        filter_fixture("3", "【有奖活动】猜猜我是谁#2全新谜题开启！", FILTER_TS - 20),
+    ]
+
+    filtering = plugin_module.ArknightsPlugin(
+        context=SimpleNamespace(send_message=None),
+        config={"feed_exclude_keywords": "签到福利,有奖活动,模组"},
+    )
+    kept = filtering._filter_pushable(
+        filter_records, watermark=FILTER_TS - 120, now=FILTER_TS, window=86400
+    )
+    check("排除关键词被过滤", [item["id"] for item in kept] == ["2"], kept)
+    check(
+        "未命中关键词的条目不误伤",
+        filtering._is_excluded("《明日方舟》EP - 大地之盐") is False,
+        None,
+    )
+
+    # 关键词留空时必须全部放行，否则用户没法关掉过滤
+    permissive = plugin_module.ArknightsPlugin(
+        context=SimpleNamespace(send_message=None), config={"feed_exclude_keywords": ""}
+    )
+    all_kept = permissive._filter_pushable(
+        filter_records, watermark=FILTER_TS - 120, now=FILTER_TS, window=86400
+    )
+    check("关键词留空时不过滤", len(all_kept) == 3, all_kept)
+
+    # 时间窗口依旧生效：把「现在」推到 48 小时后，三条都过期
+    expired = filtering._filter_pushable(
+        filter_records,
+        watermark=FILTER_TS - 120,
+        now=FILTER_TS + 48 * 3600,
+        window=86400,
+    )
+    check("超出时间窗口的条目不会被推送", expired == [], expired)
+
+    # CommandFilter only fires on an exact name or a name plus a space, so the
+    # no-space form needs its own alias; both must reach a forced sync.
+    check(
+        "抽卡同步的两种写法都已注册",
+        {"ark抽卡分析", "ark抽卡分析同步", "ark抽卡同步"}
+        <= set(plugin_module.ArknightsPlugin._HINT_CMDS),
+        f"{sorted(c for c in plugin_module.ArknightsPlugin._HINT_CMDS if '抽卡' in c)}",
+    )
+
+    captured: dict[str, bool] = {}
+
+    async def fake_gacha_records(event, force=False):
+        captured["force"] = force
+        return [], {}, {}, None
+
+    plugin._gacha_records = fake_gacha_records
+    for text, expected in (
+        ("/ark抽卡分析", False),
+        ("/ark抽卡分析 同步", True),
+        ("/ark抽卡分析同步", True),
+        ("/ark抽卡同步", True),
+        ("/ark抽卡分析 刷新", True),
+    ):
+        await drive(plugin.show_gacha(StubEvent(text)))
+        check(
+            f"{text} 强制同步={expected}",
+            captured.get("force") is expected,
+            f"实际 {captured.get('force')}",
+        )
+
+    async def fake_authorization(token: str) -> str:
+        return "auth-code"
+
+    async def fake_credential(authorization: str):
+        return SimpleNamespace(token="t", cred="c")
+
+    async def fake_player_info(cred, uid: str) -> dict:
+        return PLAYER
+
+    async def fake_sign(cred, binding) -> SignInResult:
+        return SignInResult(
+            success=True, nickname=binding.nickname, awards=["合成玉x500"]
+        )
+
+    plugin.skland.get_authorization = fake_authorization
+    plugin.skland.get_credential = fake_credential
+    async def fake_rogue_info(cred, uid: str, topic_id: str) -> dict:
+        return {"topics": [{"id": topic_id, "isSelected": True}], "career": {"node": 123, "clearInfo": {"difficulty": "测试难度", "grade": 5, "endings": [], "endingGrade": {}}}, "all": {}}
+
+    plugin.skland.get_rogue_info = fake_rogue_info
+    plugin.skland.get_player_info = fake_player_info
+    plugin.skland.sign_arknights = fake_sign
+
+    # Unbound user
+    await plugin.store.remove_user("10001")
+    results = await drive(plugin.show_note(StubEvent("/ark便签")))
+    check(
+        "ark便签 without binding prompts to bind",
+        results and results[0][0] == "plain" and "ark绑定" in results[0][1],
+        results[0][1] if results else "no result",
+    )
+
+    # Bind, then exercise every card command
+    await plugin.store.upsert_auth(
+        "10001",
+        "token",
+        "探姬",
+        [
+            {
+                "uid": "1",
+                "game_id": "1",
+                "nick_name": "探姬#9315",
+                "channel_name": "官服",
+            }
+        ],
+        umo="test:PrivateMessage:10001",
+    )
+
+    for command, handler, label in (
+        ("/ark便签", "show_note", "ark便签"),
+        ("/ark理智", "show_sanity", "ark理智"),
+        ("/ark干员列表", "show_roster", "ark干员列表"),
+    ):
+        results = await drive(getattr(plugin, handler)(StubEvent(command)))
+        image_ok = (
+            results
+            and results[0][0] == "chain"
+            and getattr(results[0][1][0], "path", None)
+            and Path(results[0][1][0].path).is_file()
+        )
+        check(f"{label} renders an image", bool(image_ok))
+
+    # Sanity alerts need a binding, so this runs after the one above.
+    results = await drive(
+        plugin.subscribe_sanity(StubEvent("/ark订阅理智", private=False))
+    )
+    check(
+        "ark订阅理智 also works in a group",
+        results and "本群" in results[0][1],
+    )
+    sanity_subs = await plugin.store.list_sanity_subs()
+    check(
+        "理智订阅记录的是群会话",
+        sanity_subs and "Group" in str(sanity_subs[0].get("umo")),
+        f"{sanity_subs[0].get('umo') if sanity_subs else ''}",
+    )
+    # Issue #1: in a group a bare "sanity is full" says nothing about whose it
+    # is, so the push names the role and mentions the subscriber.
+    sanity_sent: list[list] = []
+
+    async def capture_sanity(umo, chain):
+        sanity_sent.append(list(chain.chain))
+
+    async def fake_player(user, binding):
+        return {
+            "status": {"ap": {"current": 135, "max": 135, "completeRecoveryTime": 0}},
+            "charInfoMap": {},
+        }
+
+    # both are replaced below, so keep the originals for the later checks
+    original_player_data = plugin._player_data
+    original_context = plugin.context
+    plugin.context = SimpleNamespace(send_message=capture_sanity)
+    plugin._player_data = fake_player
+    plugin._sanity_notified.clear()
+    await plugin._sanity_poll_job()
+    pushed = sanity_sent[0] if sanity_sent else []
+    check(
+        "理智回满推送 @ 了订阅者",
+        any(type(segment).__name__ == "At" for segment in pushed),
+        f"{[type(segment).__name__ for segment in pushed]}",
+    )
+    pushed_text = "".join(str(getattr(segment, "text", "")) for segment in pushed)
+    check(
+        "理智回满推送写明了是哪个角色",
+        "探姬" in pushed_text,
+        pushed_text,
+    )
+
+    plugin._player_data = original_player_data
+    plugin.context = original_context
+
+    await plugin.unsubscribe_sanity(StubEvent("/ark取消订阅理智")).__anext__()
+
+    # Operator detail by argument; the form deliberately does not end in 面板 so
+    # that the Endfield plugin's "xx面板" regex cannot also match it.
+    results = await drive(plugin.show_operator(StubEvent("/ark干员 阿米娅")))
+    check(
+        "ark干员 <名称> renders the detail card",
+        results and results[0][0] == "chain" and Path(results[0][1][0].path).is_file(),
+    )
+
+    results = await drive(plugin.show_operator(StubEvent("/ark面板 阿米娅")))
+    check(
+        "ark面板 alias works too",
+        results and results[0][0] == "chain" and Path(results[0][1][0].path).is_file(),
+    )
+
+    results = await drive(plugin.show_operator(StubEvent("/ark干员 不存在")))
+    check(
+        "unknown operator reports a friendly hint",
+        results and results[0][0] == "plain" and "未找到干员" in results[0][1],
+    )
+
+    results = await drive(plugin.show_operator(StubEvent("/ark干员")))
+    check(
+        "ark干员 without a name prints usage",
+        results and results[0][0] == "plain" and "用法" in results[0][1],
+    )
+
+    results = await drive(plugin.do_sign(StubEvent("/ark签到")))
+    check("ark签到 reports the awards", results and "合成玉x500" in results[0][1])
+
+    results = await drive(plugin.list_bindings(StubEvent("/ark绑定列表")))
+    check(
+        "ark绑定列表 shows the role but never the token",
+        results and "token" not in results[0][1] and "1. 探姬#9315" in results[0][1],
+        results[0][1].replace("\n", " | ") if results else "no result",
+    )
+
+    results = await drive(plugin.show_help(StubEvent("/ark帮助")))
+    check("ark帮助 renders the help card", results and results[0][0] == "chain")
+
+    # Scheduler configuration
+    plugin.config = {"sign_time": "03:30", "sanity_poll_interval": 5}
+    check(
+        "sign time parses",
+        plugin._parse_sign_time(plugin.config["sign_time"]) == (3, 30),
+    )
+    await plugin.initialize()
+    check("scheduler starts with two jobs", plugin.scheduler is not None)
+    # APScheduler defaults misfire_grace_time to one second, so a run delayed by
+    # an event-loop stall is skipped outright — a skipped announce poll means the
+    # push slips a whole interval. Every job must carry a generous grace.
+    jobs = {job.id: job for job in plugin.scheduler.get_jobs()}
+    check("四个定时任务都已注册", len(jobs) == 4, sorted(jobs))
+    check(
+        "每个定时任务都有足够的 misfire 宽限",
+        all((job.misfire_grace_time or 0) >= 300 for job in jobs.values()),
+        {jid: job.misfire_grace_time for jid, job in jobs.items()},
+    )
+
+    # ── 健康看门狗：只在异常时告警，恢复正常时也通知一次 ──────────────
+    sent.clear()
+    watch = plugin_module.ArknightsPlugin(
+        context=SimpleNamespace(send_message=capture),
+        config={
+            "health_watch_umo": "coe:FriendMessage:835515264",
+            "feed_source": "selfhosted",
+        },
+    )
+
+    class FakeHealth:
+        """FeedClient stand-in whose health payload the test controls."""
+
+        def __init__(self):
+            self.payload = {
+                "stale": False,
+                "count": 1,
+                "last_success_at": 1,
+                "last_error": "",
+            }
+            self.raises = False
+
+        async def health(self):
+            if self.raises:
+                raise plugin_module.FeedError("连接超时")
+            return dict(self.payload)
+
+    hc = FakeHealth()
+    watch._feed = hc
+
+    # A single bad observation must not alert — transient blips are normal.
+    hc.payload["last_error"] = "SklandError: 用户未登录"
+    await watch._health_watch_job()
+    check("看门狗单次异常不告警", sent == [], f"{sent}")
+
+    await watch._health_watch_job()
+    check("看门狗两次异常仍不告警", sent == [], f"{sent}")
+
+    await watch._health_watch_job()
+    alert = " ".join(str(getattr(seg, "text", "")) for grp in sent for seg in grp)
+    check("看门狗连续三次异常后私聊告警", "自建公告源异常" in alert, alert[:160])
+    check("告警里带上了上游报错", "用户未登录" in alert, alert[:160])
+
+    # A continuing incident must not re-alert.
+    sent.clear()
+    await watch._health_watch_job()
+    check("同一事故不重复告警", sent == [], f"{sent}")
+
+    # stale alone alerts immediately — the service is provably not refreshing.
+    sent.clear()
+    watch._health_alerted = False
+    watch._health_failures = 0
+    hc.payload = {"stale": True, "count": 0, "last_success_at": 0, "last_error": ""}
+    await watch._health_watch_job()
+    first = " ".join(str(getattr(seg, "text", "")) for grp in sent for seg in grp)
+    check("stale 立刻告警而不必等三次", "自建公告源异常" in first, first[:160])
+    check("stale 告警说明了原因", "缓存已过期" in first, first[:160])
+
+    # Recovery is reported exactly once.
+    sent.clear()
+    hc.payload = {"stale": False, "count": 1, "last_success_at": 1, "last_error": ""}
+    await watch._health_watch_job()
+    ok = " ".join(str(getattr(seg, "text", "")) for grp in sent for seg in grp)
+    check("恢复后通知一次", "已恢复正常" in ok, ok[:160])
+
+    sent.clear()
+    await watch._health_watch_job()
+    check("恢复不重复通知", sent == [], f"{sent}")
+
+    # The other failure mode is the service being unreachable at all: health()
+    # cannot complete and raises FeedError instead of reporting a bad payload.
+    # Reset the state explicitly so nothing above can mask the outcome.
+    sent.clear()
+    watch._health_failures = 0
+    watch._health_alerted = False
+    hc.payload = {"stale": False, "count": 1, "last_success_at": 1, "last_error": ""}
+    hc.raises = True
+
+    # A single failed probe is still just a blip.
+    await watch._health_watch_job()
+    check("看门狗探活失败一次不告警", sent == [], f"{sent}")
+
+    for _ in range(plugin_module.HEALTH_WATCH_FAILURES - 1):
+        await watch._health_watch_job()
+
+    down = " ".join(str(getattr(seg, "text", "")) for grp in sent for seg in grp)
+    check(
+        "看门狗连续探活失败后私聊告警",
+        f"健康检查连续 {plugin_module.HEALTH_WATCH_FAILURES} 次失败" in down,
+        down[:160],
+    )
+    check("探活失败告警带上了 FeedError 消息", "连接超时" in down, down[:160])
+    # FeedError has to be swallowed inside the job rather than escape to the
+    # scheduler; reaching this check proves the call returned, and the counters
+    # prove it took the except branch instead of returning early.
+    check(
+        "探活失败被捕获并计入失败次数",
+        watch._health_failures == plugin_module.HEALTH_WATCH_FAILURES
+        and watch._health_alerted is True
+        and len(sent) == 1,
+        f"failures={watch._health_failures} alerted={watch._health_alerted} sent={len(sent)}",
+    )
+
+    # A clean reading after the outage reports recovery exactly once.
+    sent.clear()
+    hc.raises = False
+    await watch._health_watch_job()
+    back = " ".join(str(getattr(seg, "text", "")) for grp in sent for seg in grp)
+    check("探活恢复后通知一次", "已恢复正常" in back, back[:160])
+    check(
+        "探活恢复后看门狗状态复位",
+        watch._health_failures == 0 and watch._health_alerted is False,
+        f"failures={watch._health_failures} alerted={watch._health_alerted}",
+    )
+
+    sent.clear()
+    await watch._health_watch_job()
+    check("探活恢复不重复通知", sent == [], f"{sent}")
+
+    # Empty target disables the watchdog entirely.
+    sent.clear()
+    quiet = plugin_module.ArknightsPlugin(
+        context=SimpleNamespace(send_message=capture),
+        config={"health_watch_umo": "", "feed_source": "selfhosted"},
+    )
+    quiet._feed = hc
+    hc.payload = {"stale": True, "count": 0, "last_success_at": 0, "last_error": "x"}
+    await quiet._health_watch_job()
+    check("未配置目标时看门狗静默", sent == [], f"{sent}")
+
+    # Pinning the website source disables it too — the service is off the path.
+    sent.clear()
+    pinned = plugin_module.ArknightsPlugin(
+        context=SimpleNamespace(send_message=capture),
+        config={
+            "health_watch_umo": "coe:FriendMessage:835515264",
+            "feed_source": "official",
+        },
+    )
+    pinned._feed = hc
+    await pinned._health_watch_job()
+    check("feed_source=official 时看门狗静默", sent == [], f"{sent}")
+
+    await plugin.terminate()
+    check("terminate shuts the scheduler down", plugin.scheduler is None)
+
+    await renderer.close()
+
+    print()
+    if failures:
+        print(f"{len(failures)} check(s) failed: {failures}")
+        return 1
+    print("all integration checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))
