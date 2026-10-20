@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      {{ base_css | safe }}
+      .theme {
+        border: 1px solid var(--line);
+        margin-bottom: 12px;
+      }
+      .theme-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 14px;
+        background: var(--panel-alt);
+        border-bottom: 1px solid var(--line);
+      }
+      .difficulty-details { padding: 12px 14px; border-top: 1px solid var(--line-soft); font-size: 12px; line-height: 1.8; }
+      .difficulty-details strong { color: var(--accent); }
+      .difficulty-note { color: var(--muted); font-size: 10px; }
+      .theme-name {
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: 0.6px;
+      }
+      .theme-name::before {
+        content: "";
+        display: inline-block;
+        width: 4px;
+        height: 14px;
+        margin-right: 9px;
+        background: var(--accent);
+        vertical-align: -2px;
+      }
+      .theme-body {
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+      }
+      .theme-stat {
+        grid-column: span 2;
+        padding: 11px 14px;
+        border-right: 1px solid var(--line-soft);
+      }
+      .theme-stat:nth-child(-n+2) { grid-column: span 3; border-bottom: 1px solid var(--line-soft); }
+      .theme-stat:last-child {
+        border-right: none;
+      }
+      .theme-key {
+        font-size: 11px;
+        color: var(--muted);
+        letter-spacing: 1.3px;
+      }
+      .theme-val {
+        font-size: 21px;
+        font-weight: 700;
+        margin-top: 3px;
+      }
+      .theme-val.accent {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card {{ card_class }}">
+      <div class="card-header">
+        <div class="card-title">集成战略</div>
+        <div class="card-subtitle">Integrated Strategies</div>
+      </div>
+      <div class="stripes"></div>
+
+      {% if rogue.themes %}
+      {% for theme in rogue.themes %}
+      <div class="theme">
+        <div class="theme-head">
+          <span class="theme-name">{{ theme.name }}</span>
+        </div>
+        <div class="theme-body">
+          <div class="theme-stat"><div class="theme-key">累计节点</div><div class="theme-val accent">{{ theme.nodes if theme.nodes is not none else "未提供" }}</div></div>
+          <div class="theme-stat"><div class="theme-key">通关次数</div><div class="theme-val">{{ theme.clears if theme.clears is not none else "未提供" }}</div></div>
+          <div class="theme-stat">
+            <div class="theme-key">收藏品</div>
+            <div class="theme-val accent">{{ theme.relics }}</div>
+          </div>
+          <div class="theme-stat">
+            <div class="theme-key">投资系统</div>
+            <div class="theme-val">{{ theme.bank }}</div>
+          </div>
+          <div class="theme-stat">
+            <div class="theme-key">历史最高</div>
+            <div class="theme-val">{{ theme.bank_record }}</div>
+          </div>
+        </div>
+        <div class="difficulty-details">
+          <strong>最高通关难度：{{ theme.highest_difficulty or "未提供" }}</strong>
+          {% if theme.ending_difficulties %}<div>{{ theme.ending_difficulties | join("　·　") }}</div>{% endif %}
+          {% if not theme.ending_details_complete %}<div class="difficulty-note">接口未提供各结局完整的最高难度记录</div>{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="empty">暂无集成战略记录</div>
+      {% endif %}
+
+      <div class="card-footer">
+        <span>© HYPERGRYPH · 累计节点来自主题生涯统计 · 通关次数来自森空岛快照 · 未提供不代表零</span>
+        <span><span class="barcode"></span><span class="serial">RI-ROGUE-001</span></span>
+      </div>
+    </div>
+  </body>
+</html>

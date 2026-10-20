@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      {{ base_css | safe }}
+      .help-group {
+        break-inside: avoid;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card {{ card_class }}">
+      <div class="card-header">
+        <div class="card-title">罗德岛终端</div>
+        <div class="card-subtitle">Rhodes Island · v{{ version }}</div>
+      </div>
+      <div class="stripes"></div>
+
+      {% for section in sections %}
+      <div class="panel">
+        <div class="section-title">{{ section.title }}</div>
+        <div class="help-grid">
+          {% for item in section["items"] %}
+          <div class="help-group">
+            <div class="help-command">{{ item.cmd }}</div>
+            <div class="help-desc">{{ item.desc }}</div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+
+      <div class="card-footer">
+        <span>© HYPERGRYPH · 账号凭证仅保存在本机，不会在任何回复中回显</span>
+        <span><span class="barcode"></span><span class="serial">RI-TERMINAL-001</span></span>
+      </div>
+    </div>
+  </body>
+</html>

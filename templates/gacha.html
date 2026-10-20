@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      {{ base_css | safe }}
+      .overview {
+        display: flex;
+        border: 1px solid var(--line);
+        margin-bottom: 22px;
+      }
+      .overview-cell {
+        flex: 1;
+        padding: 11px 14px;
+        border-right: 1px solid var(--line);
+      }
+      .overview-cell:last-child {
+        border-right: none;
+      }
+      .overview-key {
+        font-size: 10.5px;
+        color: var(--muted);
+        letter-spacing: 1.4px;
+      }
+      .overview-val {
+        font-size: 23px;
+        font-weight: 700;
+        margin-top: 4px;
+      }
+      .overview-val small {
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 400;
+      }
+      .overview-val.hot {
+        color: var(--accent);
+      }
+      .overview-meta {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 3px;
+      }
+
+      /* ---- one section per banner family ---- */
+      .banner {
+        border: 1px solid var(--line);
+        margin-bottom: 16px;
+      }
+      .banner-head {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 11px 15px;
+        background: var(--panel-alt);
+        border-bottom: 1px solid var(--line);
+      }
+      .banner-name {
+        flex: 1;
+        font-size: 16px;
+        font-weight: 700;
+        letter-spacing: 0.8px;
+      }
+      .banner-tag {
+        font-size: 10px;
+        letter-spacing: 1.1px;
+        padding: 2px 7px;
+        border: 1px solid var(--line);
+        color: var(--label);
+        flex: none;
+      }
+      .banner-name::before {
+        content: "";
+        display: inline-block;
+        width: 4px;
+        height: 15px;
+        margin-right: 9px;
+        background: var(--accent);
+        vertical-align: -2px;
+      }
+      .pity-pill {
+        font-size: 12px;
+        padding: 4px 12px;
+        border: 1px solid var(--accent);
+        color: var(--accent);
+        letter-spacing: 0.5px;
+      }
+      .pity-pill b {
+        font-size: 15px;
+      }
+      .banner-date {
+        line-height: 1.5;
+        font-size: 11px;
+        color: var(--muted);
+        padding: 7px 15px 0;
+        letter-spacing: 0.5px;
+      }
+      .banner-body {
+        display: flex;
+        align-items: stretch;
+        gap: 14px;
+        padding: 12px 15px 4px;
+      }
+      .banner-stats {
+        display: flex;
+        flex: 1;
+        border: 1px solid var(--line);
+      }
+      .bstat {
+        flex: 1;
+        padding: 9px 13px;
+        border-right: 1px solid var(--line);
+      }
+      .bstat:last-child {
+        border-right: none;
+      }
+      .bstat-key {
+        font-size: 10.5px;
+        color: var(--muted);
+        letter-spacing: 1.3px;
+      }
+      .bstat-val {
+        font-size: 21px;
+        font-weight: 700;
+        margin-top: 3px;
+      }
+      .bstat-val.accent {
+        color: var(--accent);
+      }
+      .rating {
+        width: 118px;
+        flex: none;
+        border: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        font-weight: 700;
+        letter-spacing: 1px;
+        color: var(--accent);
+        text-align: center;
+        padding: 4px;
+      }
+      .rating.none {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 400;
+        letter-spacing: 0.5px;
+      }
+      .ops {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 11px;
+        padding: 12px 15px 15px;
+      }
+      .op {
+        width: 108px;
+        text-align: center;
+      }
+      .op-art {
+        position: relative;
+        width: 108px;
+        height: 142px;
+        border: 1px solid var(--line);
+        background: linear-gradient(180deg, #1e232c 0%, #0f1114 100%);
+        overflow: hidden;
+      }
+      .op-art img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        object-position: center top;
+        display: block;
+      }
+      .op-art .up,
+      .op-art .off {
+        position: absolute;
+        top: 0;
+        left: 0;
+        font-size: 10px;
+        font-weight: 700;
+        padding: 1px 6px;
+        letter-spacing: 0.5px;
+      }
+      .op-art .up {
+        background: var(--accent);
+        color: #0a0b0d;
+      }
+      .op-art .off {
+        background: var(--danger);
+        color: #0a0b0d;
+      }
+      .op-pulls {
+        font-size: 11px;
+        color: var(--accent);
+        font-weight: 700;
+        margin-top: 4px;
+      }
+      .op-name {
+        font-size: 11px;
+        color: var(--label);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .note {
+        font-size: 11px;
+        color: var(--muted);
+        padding: 0 15px 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card {{ card_class }}">
+      <div class="card-header">
+        <div class="card-title">抽卡分析</div>
+        <div class="card-subtitle">Headhunting Report</div>
+      </div>
+      <div class="stripes"></div>
+
+      <div class="overview">
+        <div class="overview-cell">
+          <div class="overview-key">总抽数</div>
+          <div class="overview-val">{{ gacha.total }}</div>
+        </div>
+        <div class="overview-cell">
+          <div class="overview-key">六星</div>
+          <div class="overview-val hot">{{ gacha.six_total }}</div>
+          <div class="overview-meta">五星 {{ gacha.five_total }}</div>
+        </div>
+        <div class="overview-cell">
+          <div class="overview-key">平均出六</div>
+          <div class="overview-val">{{ gacha.avg_six }}<small> 抽</small></div>
+          <div class="overview-meta">整体口径</div>
+        </div>
+        <div class="overview-cell">
+          <div class="overview-key">卡池数</div>
+          <div class="overview-val">{{ gacha.banner_count }}</div>
+          <div class="overview-meta">
+            {% if gacha.just_synced %}本次已同步官网{% else %}使用本地记录{% endif %}
+          </div>
+        </div>
+      </div>
+
+      {% for banner in gacha.banners %}
+      <div class="banner">
+        <div class="banner-head">
+          <span class="banner-name">{{ banner.label }}</span>
+          <span class="banner-tag">{{ banner.family }}</span>
+          <span class="pity-pill">已 <b>{{ banner.pity }}</b> 抽未出六星</span>
+        </div>
+        <div class="banner-date">
+          {{ banner.date_range }}{% if banner.up_names %} · UP {{ banner.up_names | join(" / ") }}{% endif %}
+        </div>
+
+        <div class="banner-body">
+          <div class="banner-stats">
+            <div class="bstat">
+              <div class="bstat-key">平均出六</div>
+              <div class="bstat-val accent">
+                {{ banner.avg_six if banner.six_total else "—" }}
+              </div>
+            </div>
+            <div class="bstat">
+              <div class="bstat-key">平均UP</div>
+              <div class="bstat-val">
+                {% if banner.up_known and banner.up_hits %}{{ banner.avg_up }}{% else %}—{% endif %}
+              </div>
+            </div>
+            <div class="bstat">
+              <div class="bstat-key">总抽数</div>
+              <div class="bstat-val">{{ banner.total }}</div>
+            </div>
+          </div>
+          {% if banner.luck %}
+          <div class="rating">{{ banner.luck }}</div>
+          {% else %}
+          <div class="rating none">暂无六星</div>
+          {% endif %}
+        </div>
+
+        {% if banner.six_stars %}
+        <div class="ops">
+          {% for item in banner.six_stars %}
+          <div class="op rarity-{{ item.stars }}">
+            <div class="op-art">
+              <img src="{{ item.portrait or item.avatar }}" alt="{{ item.name }}" />
+              {% if item.is_up is sameas true %}
+              <span class="up">UP!</span>
+              {% elif item.is_up is sameas false %}
+              <span class="off">歪</span>
+              {% endif %}
+            </div>
+            <div class="op-pulls">{{ item.pulls }} 抽</div>
+            <div class="op-name">{{ item.name }}</div>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="note">该卡池暂无六星记录</div>
+        {% endif %}
+
+        {% if not banner.up_known %}
+        <div class="note">
+          {{ banner.up_note or "该卡池没有可用的 UP 名单，因此不做 UP / 歪判定" }}
+        </div>
+        {% elif not banner.five_total %}
+        <div class="note">该卡池暂无五星记录</div>
+        {% endif %}
+
+      </div>
+      {% endfor %}
+
+      <div class="card-footer">
+        <span>
+          © HYPERGRYPH · 本地共 {{ gacha.stored_total }} 条 · 同步于
+          {{ gacha.synced_text }}
+        </span>
+        <span><span class="barcode"></span><span class="serial">RI-HEADHUNT-001</span></span>
+      </div>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      {{ base_css | safe }}
+      .detail {
+        display: flex;
+        gap: 24px;
+        align-items: flex-start;
+      }
+      .detail-portrait {
+        width: 320px;
+        flex: none;
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background:
+          linear-gradient(145deg, rgba(255, 202, 98, 0.2), transparent 40%),
+          linear-gradient(25deg, rgba(255, 113, 143, 0.18), transparent 45%),
+          #151925;
+      }
+      .detail-portrait img {
+        width: 320px;
+        height: 456px;
+        object-fit: contain;
+        object-position: center bottom;
+        display: block;
+        filter: saturate(1.08) contrast(1.02);
+      }
+      .detail-portrait::after {
+        content: "";
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 92px;
+        height: 6px;
+        background: linear-gradient(90deg, var(--theme), var(--theme-2));
+      }
+      .detail-body {
+        flex: 1;
+        min-width: 0;
+      }
+      .detail-name {
+        font-size: 36px;
+        font-weight: 800;
+        letter-spacing: 1px;
+        line-height: 1.1;
+      }
+      .detail-name::before {
+        content: "";
+        display: inline-block;
+        width: 6px;
+        height: 28px;
+        margin-right: 12px;
+        background: linear-gradient(180deg, var(--theme), var(--theme-2));
+        vertical-align: -2px;
+      }
+      .detail-meta {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 12px 0 20px;
+        flex-wrap: wrap;
+      }
+      .detail-meta img.rank {
+        height: 17px;
+      }
+      .detail-meta img.cls {
+        width: 26px;
+        height: 26px;
+      }
+      .detail-meta img.mark {
+        height: 20px;
+      }
+      .badge {
+        font-size: 11px;
+        letter-spacing: 1.4px;
+        padding: 3px 11px;
+        border: 1px solid var(--line);
+        color: var(--label);
+      }
+      .badge.hot {
+        border-color: var(--theme);
+        color: var(--theme);
+      }
+      .skill-row {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--line-soft);
+        font-size: 14px;
+      }
+      .skill-row:last-child {
+        border-bottom: none;
+      }
+      .skill-row img {
+        width: 42px;
+        height: 42px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel-alt);
+        flex: none;
+      }
+      .skill-name {
+        flex: 1;
+        color: var(--label);
+        font-family: Menlo, Consolas, monospace;
+        font-size: 11.5px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .mark {
+        font-size: 10px;
+        letter-spacing: 1px;
+        color: #0a0b0d;
+        background: var(--theme);
+        padding: 1px 5px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card {{ card_class }}">
+      <div class="detail rarity-{{ op.stars }}">
+        <div class="detail-portrait">
+          <img src="{{ op.portrait or op.avatar }}" alt="{{ op.name }}" />
+        </div>
+        <div class="detail-body">
+          <div class="detail-name">{{ op.name }}</div>
+          <div class="detail-meta">
+            {% if op.rarity_icon %}
+            <img class="rank" src="{{ op.rarity_icon }}" alt="{{ op.stars }}星" />
+            {% else %}
+            <span class="stars">{{ "★" * op.stars }}</span>
+            {% endif %}
+            {% if op.profession_icon %}
+            <img class="cls" src="{{ op.profession_icon }}" alt="{{ op.profession_cn }}" />
+            {% endif %}
+            <span class="badge">{{ op.profession_cn }}</span>
+            {% if op.elite_icon and op.elite %}
+            <img class="mark" src="{{ op.elite_icon }}" alt="精英{{ op.elite }}" />
+            {% elif not op.elite %}
+            <span class="badge">未精英化</span>
+            {% endif %}
+            {% if op.potential_icon %}
+            <img class="mark" src="{{ op.potential_icon }}" alt="潜能{{ op.potential }}" />
+            {% endif %}
+            <span class="badge hot">信赖 {{ op.favor }}%</span>
+          </div>
+
+          <div class="panel">
+            <div class="section-title">培养</div>
+            <div class="row">
+              <span class="row-label">等级</span>
+              <span class="row-value accent">{{ op.level }}</span>
+            </div>
+            <div class="progress">
+              <div class="progress-fill" style="width: {{ op.favor_percent }}%"></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="section-title">技能</div>
+            {% if op.skills %}
+            {% for skill in op.skills %}
+            <div class="skill-row">
+              {% if skill.icon %}<img src="{{ skill.icon }}" alt="{{ skill.id }}" />{% endif %}
+              <span class="skill-name">{{ skill.id }}</span>
+              {% if skill.is_default %}<span class="mark">默认</span>{% endif %}
+              <span class="row-value">
+                {% if skill.specialize %}专精 {{ skill.specialize }}{% else %}未专精{% endif %}
+              </span>
+            </div>
+            {% endfor %}
+            {% else %}
+            <div class="empty">暂无技能数据</div>
+            {% endif %}
+          </div>
+
+          <div class="panel">
+            <div class="section-title">模组</div>
+            {% if op.equips %}
+            {% for equip in op.equips %}
+            <div class="row">
+              <span class="row-label">{{ equip.name }}</span>
+              <span class="row-value">Lv.{{ equip.level }}</span>
+            </div>
+            {% endfor %}
+            {% else %}
+            <div class="empty">未装配模组</div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <div class="card-footer">
+        <span>© HYPERGRYPH · SNAPSHOT / SKLAND</span>
+        <span><span class="barcode"></span><span class="serial">RI-OPERATOR-001</span></span>
+      </div>
+    </div>
+  </body>
+</html>

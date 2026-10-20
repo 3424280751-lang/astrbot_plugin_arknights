@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      {{ base_css | safe }}
+      .sanity-block {
+        display: flex;
+        align-items: baseline;
+        gap: 14px;
+        margin: 2px 0 16px;
+      }
+      .sanity-value {
+        font-size: 76px;
+        font-weight: 800;
+        line-height: 0.9;
+        color: var(--theme);
+        letter-spacing: 0;
+      }
+      .sanity-max {
+        font-size: 20px;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .sanity-state {
+        margin-left: auto;
+        font-size: 13px;
+        letter-spacing: 2px;
+        padding: 5px 14px;
+        border: 1px solid var(--theme);
+        border-radius: 5px;
+        color: var(--theme);
+      }
+      .sanity-state.waiting {
+        border-color: var(--line);
+        color: var(--label);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card {{ card_class }}">
+      <div class="card-header">
+        <div class="card-title">理智</div>
+        <div class="card-subtitle">{{ sanity.nickname or "未知博士" }}</div>
+      </div>
+      <div class="stripes"></div>
+
+      <div class="sanity-block">
+        <span class="sanity-value">{{ sanity.current }}</span>
+        <span class="sanity-max">/ {{ sanity.max }}</span>
+        <span class="sanity-state {% if not sanity.full %}waiting{% endif %}">
+          {% if sanity.full %}FULL{% else %}RECOVERING{% endif %}
+        </span>
+      </div>
+
+      <div class="progress">
+        <div class="progress-fill" style="width: {{ sanity.percent }}%"></div>
+      </div>
+
+      <div class="panel" style="margin-top: 4px">
+        <div class="section-title">
+          {% if sanity.full %}状态{% else %}距回满{% endif %}
+        </div>
+        <div class="row">
+          <span class="row-label">剩余时间</span>
+          <span class="row-value accent">{{ sanity.remaining_text }}</span>
+        </div>
+        <div class="row">
+          <span class="row-label">恢复速率</span>
+          <span class="row-value">{{ sanity.recovery_minutes }} 分钟 / 点</span>
+        </div>
+      </div>
+
+      <div class="card-footer">
+        <span>© HYPERGRYPH · 数据时间 {{ sanity.data_time }}</span>
+        <span><span class="barcode"></span><span class="serial">RI-SANITY-001</span></span>
+      </div>
+    </div>
+  </body>
+</html>

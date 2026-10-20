@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      {{ base_css | safe }}
+      .roster-group {
+        margin-bottom: 20px;
+        padding: 12px 14px 14px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: rgba(13, 15, 24, 0.58);
+      }
+      .roster-head {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        margin-bottom: 9px;
+        padding-bottom: 5px;
+        border-bottom: 1px solid var(--line-soft);
+      }
+      .roster-head img {
+        width: 20px;
+        height: 20px;
+        flex: none;
+    }
+      .roster-name {
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--theme);
+        letter-spacing: 2px;
+      }
+      .roster-count {
+        font-size: 11px;
+        color: var(--muted);
+        border: 1px solid var(--line);
+        padding: 0 6px;
+        line-height: 16px;
+      }
+      .tile {
+        position: relative;
+        width: 76px;
+      }
+      .tile img {
+        width: 70px;
+        height: 70px;
+      }
+      .tile .stars {
+        font-size: 10px;
+        color: var(--theme);
+        text-align: center;
+        line-height: 12px;
+        letter-spacing: 0;
+      }
+      .tile .elite {
+        position: absolute;
+        top: 0;
+        left: 0;
+        font-size: 10px;
+        font-weight: 700;
+        color: #0a0b0d;
+        background: linear-gradient(135deg, var(--theme), var(--theme-2));
+        padding: 0 4px;
+      }
+      .owned-bar {
+        display: flex;
+        gap: 0;
+        border: 1px solid var(--line);
+        margin-bottom: 20px;
+        border-radius: 7px;
+        overflow: hidden;
+        background: rgba(13, 15, 24, 0.66);
+      }
+      .owned-cell {
+        flex: 1;
+        padding: 9px 14px;
+        border-right: 1px solid var(--line);
+        font-size: 11px;
+        color: var(--muted);
+        letter-spacing: 1.2px;
+      }
+      .owned-cell:last-child {
+        border-right: none;
+      }
+      .owned-cell b {
+        display: block;
+        font-size: 20px;
+        color: var(--text);
+        margin-top: 3px;
+        letter-spacing: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card {{ card_class }}">
+      <div class="card-header">
+        <div class="card-title">干员图鉴</div>
+        <div class="card-subtitle">Operator Roster</div>
+      </div>
+      <div class="stripes"></div>
+
+      <div class="owned-bar">
+        <div class="owned-cell">已持有<b>{{ roster.owned }}</b></div>
+        <div class="owned-cell">图鉴总数<b>{{ roster.total }}</b></div>
+        <div class="owned-cell">
+          收集率<b>{{ (roster.owned * 100 // roster.total) if roster.total else 0 }}%</b>
+        </div>
+      </div>
+
+      {% if roster.groups %}
+      {% for group in roster.groups %}
+      <div class="roster-group">
+        <div class="roster-head">
+          {% if group.operators[0].profession_icon %}
+          <img src="{{ group.operators[0].profession_icon }}" alt="" />
+          {% endif %}
+          <span class="roster-name">{{ group.profession_cn }}</span>
+          <span class="roster-count">{{ group.operators | length }}</span>
+        </div>
+        <div class="grid">
+          {% for op in group.operators %}
+          <div class="tile rarity-{{ op.stars }}" data-rarity="{{ op.stars }}">
+            <img src="{{ op.avatar }}" alt="{{ op.name }}" />
+            {% if op.elite %}<span class="elite">E{{ op.elite }}</span>{% endif %}
+            <div class="stars">{{ "★" * op.stars }}</div>
+            <div class="name">{{ op.name }}</div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="empty">没有查询到已持有的干员。</div>
+      {% endif %}
+
+      <div class="card-footer">
+        <span>© HYPERGRYPH · E1 / E2 为精英化阶段，星级为干员稀有度</span>
+        <span><span class="barcode"></span><span class="serial">RI-ROSTER-001</span></span>
+      </div>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      {{ base_css | safe }}
+      .id-block {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        width: 100%;
+      }
+      .id-name {
+        font-size: 34px;
+        font-weight: 800;
+        letter-spacing: 0.8px;
+      }
+      .id-level {
+        font-size: 12px;
+        color: var(--label);
+        letter-spacing: 1.6px;
+      }
+      .id-level b {
+        color: var(--theme);
+        font-size: 26px;
+        margin-left: 7px;
+      }
+      .body {
+        display: flex;
+        gap: 22px;
+        align-items: stretch;
+      }
+      /* Assistant column: the artwork fills the whole column height and the
+         badge strip sits underneath, as in the approved design. */
+      .assistant {
+        width: 316px;
+        flex: none;
+        display: flex;
+        flex-direction: column;
+      }
+      .assistant-art {
+        position: relative;
+        flex: 1;
+        min-height: 430px;
+        border: 1px solid var(--line);
+        border-radius: 8px 8px 0 0;
+        background:
+          linear-gradient(145deg, rgba(255, 130, 159, 0.22), transparent 42%),
+          linear-gradient(25deg, rgba(98, 219, 233, 0.18), transparent 48%),
+          linear-gradient(180deg, #222638 0%, #0e1119 100%);
+        overflow: hidden;
+      }
+      .assistant-art::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        background: linear-gradient(180deg, transparent 68%, rgba(8, 10, 17, 0.38));
+        pointer-events: none;
+      }
+      .assistant-art img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        object-position: center bottom;
+        display: block;
+        filter: saturate(1.1) contrast(1.02);
+      }
+      .assistant-badge {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        border: 1px solid var(--line);
+        border-top: none;
+        padding: 9px 12px;
+        border-radius: 0 0 8px 8px;
+        background: linear-gradient(90deg, rgba(255, 130, 159, 0.14), rgba(20, 23, 35, 0.95));
+      }
+      .assistant-badge .cls {
+        width: 30px;
+        height: 30px;
+        flex: none;
+      }
+      .assistant-badge .rank {
+        height: 17px;
+        flex: none;
+      }
+      .assistant-name {
+        font-size: 17px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+      }
+      .assistant-role {
+        font-size: 9.5px;
+        color: var(--muted);
+        letter-spacing: 1.8px;
+        margin-top: 1px;
+      }
+      .signature {
+        margin-top: 9px;
+        padding: 9px 11px;
+        border: 1px solid var(--line);
+        border-left: 2px solid var(--theme-2);
+        border-radius: 6px;
+        background: rgba(20, 22, 33, 0.86);
+        font-size: 12px;
+        color: var(--label);
+        line-height: 1.55;
+        max-height: 76px;
+        overflow: hidden;
+      }
+      .right {
+        flex: 1;
+        min-width: 0;
+      }
+      .stat-strip {
+        display: flex;
+        margin-bottom: 14px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        overflow: hidden;
+        background: rgba(13, 15, 24, 0.66);
+      }
+      .stat-cell {
+        flex: 1;
+        padding: 10px 13px;
+        border-right: 1px solid var(--line);
+      }
+      .stat-cell:last-child {
+        border-right: none;
+      }
+      .stat-key {
+        font-size: 11px;
+        color: var(--muted);
+        letter-spacing: 1.4px;
+      }
+      .stat-val {
+        font-size: 21px;
+        font-weight: 800;
+        margin-top: 4px;
+      }
+      .assist-op {
+        width: 104px;
+      }
+      .assist-op img {
+        width: 98px;
+        height: 98px;
+        border-color: color-mix(in srgb, var(--theme-2) 34%, var(--line));
+      }
+      .assist-op .name {
+        font-size: 11.5px;
+        color: var(--text);
+      }
+      .assist-op .lv {
+        font-size: 10.5px;
+        color: var(--muted);
+        letter-spacing: 0.5px;
+      }
+      .serial {
+        letter-spacing: 1.2px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card {{ card_class }}">
+      <div class="card-header">
+        <div class="id-block">
+          <div class="id-name">{{ note.nickname or "未知博士" }}</div>
+          <div class="id-level">LEVEL<b>{{ note.level }}</b></div>
+        </div>
+      </div>
+      <div class="stripes"></div>
+
+      <div class="body">
+        <div class="assistant rarity-{{ note.secretary.stars }}">
+          <div class="assistant-art">
+            {% if note.secretary.portrait %}
+            <img src="{{ note.secretary.portrait }}" alt="{{ note.secretary.name }}" />
+            {% endif %}
+            <span class="tick"></span>
+          </div>
+          <div class="assistant-badge">
+            {% if note.secretary.profession_icon %}
+            <img class="cls" src="{{ note.secretary.profession_icon }}" alt="" />
+            {% endif %}
+            <span>
+              <span class="assistant-name">{{ note.secretary.name or "未设置助理" }}</span>
+              <span class="assistant-role">ASSISTANT</span>
+            </span>
+            {% if note.secretary.rarity_icon %}
+            <img class="rank" src="{{ note.secretary.rarity_icon }}" alt="" style="margin-left: auto" />
+            {% endif %}
+          </div>
+          {% if note.signature %}
+          <div class="signature">{{ note.signature }}</div>
+          {% endif %}
+        </div>
+
+        <div class="right">
+          <div class="stat-strip">
+            <div class="stat-cell">
+              <div class="stat-key">入职日期</div>
+              <div class="stat-val">{{ note.register_date }}</div>
+            </div>
+            <div class="stat-cell">
+              <div class="stat-key">主线进度</div>
+              <div class="stat-val">{{ note.main_stage }}</div>
+            </div>
+          </div>
+          <div class="stat-strip">
+            <div class="stat-cell">
+              <div class="stat-key">干员数量</div>
+              <div class="stat-val">{{ note.char_count }}</div>
+            </div>
+            <div class="stat-cell">
+              <div class="stat-key">时装数量</div>
+              <div class="stat-val">{{ note.skin_count }}</div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="section-title">理智</div>
+            <div class="row">
+              <span class="row-label">当前理智</span>
+              <span class="row-value accent">
+                {{ note.sanity.current }}
+                <span style="color: var(--muted); font-weight: 400">
+                  / {{ note.sanity.max }}
+                </span>
+              </span>
+            </div>
+            <div class="progress">
+              <div class="progress-fill" style="width: {{ note.sanity.percent }}%"></div>
+            </div>
+            <div class="row">
+              <span class="row-label">恢复</span>
+              <span class="row-value">{{ note.sanity.remaining_text }}</span>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="section-title">进度</div>
+            {% for item in [{"label": "每日任务", "node": note.daily},
+                            {"label": "每周任务", "node": note.weekly},
+                            {"label": "剿灭合成玉", "node": note.campaign}] %}
+            <div class="row">
+              <span class="row-label">{{ item.label }}</span>
+              <span class="row-value">{{ item.node.current }} / {{ item.node.total }}</span>
+            </div>
+            <div class="progress">
+              <div class="progress-fill" style="width: {{ item.node.percent }}%"></div>
+            </div>
+            {% endfor %}
+          </div>
+
+          <div class="panel" style="margin-bottom: 0">
+            <div class="section-title">助战干员</div>
+            {% if note.assist %}
+            <div class="grid">
+              {% for op in note.assist %}
+              <div class="tile assist-op rarity-{{ op.stars }}" data-rarity="{{ op.stars }}">
+                <img src="{{ op.avatar }}" alt="{{ op.name }}" />
+                <div class="name">{{ op.name }}</div>
+                <div class="lv">Lv.{{ op.level }}</div>
+              </div>
+              {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty">未设置助战干员</div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <div class="card-footer">
+        <span>© HYPERGRYPH · 数据时间 {{ note.data_time }}</span>
+        <span>
+          <span class="barcode"></span>
+          <span class="serial">
+            RI-{{ note.register_date | replace("-", "") }}-{{ note.level }}
+          </span>
+        </span>
+      </div>
+    </div>
+  </body>
+</html>
