@@ -1,3 +1,5 @@
+> 完整源码备份（含原版可选公告服务端）：[下载 0.4.6 改版源码包](astrbot_plugin_arknights-0.4.6-custom.zip)。仓库根目录可直接作为 AstrBot 插件安装；服务端为可选组件，不影响机器人侧使用。
+
 > **个人维护的 0.4.6 改版**：基于 [Siq5005/astrbot_plugin_arknights](https://github.com/Siq5005/astrbot_plugin_arknights)，保留原作者署名和 MIT 许可证。新增各肉鸽主题的累计节点、通关次数、最高通关难度，以及接口提供的分结局最高难度。旧主题缺失的字段显示“未提供”，不根据近期记录推算累计最高值。
 
 <div align="center">
@@ -76,7 +78,7 @@
 
 ```bash
 cd AstrBot/data/plugins
-git clone https://github.com/Siq5005/astrbot_plugin_arknights.git
+git clone https://github.com/3424280751-lang/astrbot_plugin_arknights.git
 ```
 
 ### 环境依赖
@@ -167,7 +169,7 @@ astrbot_plugin_arknights/
 |:-----|:-----|:-----|
 | `ark基建` | 发电站 / 制造站 / 贸易站 / 宿舍 / 控制中枢 / 会客室，含干员心情、无人机与线索 | 全部 |
 | `ark剿灭` | 剿灭作战进度与本周合成玉 | 全部 |
-| `ark肉鸽` | 集成战略收藏品与投资进度 | 全部 |
+| `ark肉鸽` | 集成战略累计节点、通关次数、最高通关难度、分结局难度及收藏品和投资进度 | 全部 |
 | `ark任务` | 每日 / 每周任务与周常奖励 | 全部 |
 | `ark公招` | 公开招募栏位状态与倒计时 | 全部 |
 
