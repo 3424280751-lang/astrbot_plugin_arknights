@@ -15,6 +15,7 @@ from .assets import (
     rarity_icon,
     secretary_portrait,
 )
+from .operators import training_summary
 from .skland import SANITY_SECONDS_PER_POINT, derive_sanity
 
 UNKNOWN_TEXT = "未知"
@@ -166,12 +167,29 @@ def build_note_context(
     skins = data.get("skins") or []
     routine = data.get("routine") or {}
 
+    equipment_info = data.get("equipmentInfoMap") or {}
+    owned_chars = {str(item.get("charId") or ""): item for item in chars}
+    unlocked_modules = {
+        (char_id, module["id"]): module["level"]
+        for char_id, char in owned_chars.items()
+        for module in training_summary(char, equipment_info)["unlocked_modules"]
+    }
+    elite2_count = sum(
+        int(char.get("evolvePhase") or 0) == 2 for char in owned_chars.values()
+    )
+    mastery3_skills = {
+        (char_id, str(skill.get("id") or index))
+        for char_id, char in owned_chars.items()
+        for index, skill in enumerate(char.get("skills") or [])
+        if isinstance(skill, dict) and int(skill.get("specializeLevel") or 0) == 3
+    }
     assist = []
     for item in data.get("assistChars") or []:
         char_id = str(item.get("charId") or "")
         info = char_info.get(char_id) or {}
         assist.append(
             {
+                **training_summary(owned_chars.get(char_id, item), equipment_info),
                 "char_id": char_id,
                 "name": info.get("name") or char_id,
                 "level": int(item.get("level") or 0),
@@ -190,7 +208,13 @@ def build_note_context(
         "nickname": status.get("name") or "",
         "level": int(status.get("level") or 0),
         "signature": str(status.get("resume") or "").strip(),
+        "elite2_count": elite2_count,
+        "mastery3_count": len(mastery3_skills),
+        "module_count": len(unlocked_modules),
+        "module_stage3_count": sum(level == 3 for level in unlocked_modules.values()),
+        "module_operator_count": len({char_id for char_id, _ in unlocked_modules}),
         "secretary": {
+            **training_summary(owned_chars.get(secretary_id, {}), equipment_info),
             "char_id": secretary_id,
             "name": str(secretary_meta.get("name") or secretary_id),
             "stars": secretary_stars,

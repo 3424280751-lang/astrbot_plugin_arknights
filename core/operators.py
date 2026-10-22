@@ -34,6 +34,62 @@ PROFESSION_CN: dict[str, str] = {
 UNKNOWN_PROFESSION_CN = "其他"
 
 
+def training_summary(
+    char: dict[str, Any], equipment_info: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Summarize learned skills and unlocked, non-default modules."""
+    equipment_info = equipment_info or {}
+    skills = [item for item in (char.get("skills") or []) if isinstance(item, dict)]
+    mastery = [
+        f"S{index} 专{int(item.get('specializeLevel') or 0)}"
+        for index, item in enumerate(skills, 1)
+    ]
+    modules = {}
+    for item in char.get("equip") or []:
+        if not isinstance(item, dict):
+            continue
+        equip_id = str(item.get("id") or "")
+        level = int(item.get("level") or 0)
+        meta = equipment_info.get(equip_id) or {}
+        if (
+            not equip_id
+            or level <= 0
+            or item.get("locked") is True
+            or equip_id.startswith("uniequip_001_")
+            or str(meta.get("typeIcon") or "").strip().lower() == "original"
+        ):
+            continue
+        modules[equip_id] = {
+            "id": equip_id,
+            "name": str(meta.get("name") or equip_id),
+            "level": level,
+        }
+    return {
+        "potential_level": max(0, min(5, int(char["potentialRank"]))) + 1
+        if char.get("potentialRank") is not None
+        else None,
+        "potential_badge_icon": potential_icon(
+            max(0, min(5, int(char["potentialRank"])))
+        )
+        if char.get("potentialRank") is not None
+        else "",
+        "mastery_badges": [
+            {
+                "slot": index,
+                "icon": skill_icon(str(item.get("id") or "")) if item.get("id") else "",
+                "level": max(0, min(3, int(item.get("specializeLevel") or 0))),
+            }
+            for index, item in enumerate(skills, 1)
+        ],
+        "mastery_text": " / ".join(mastery) if mastery else "暂无技能数据",
+        "module_text": " / ".join(
+            f"{item['name']} Lv.{item['level']}" for item in modules.values()
+        )
+        or "无已开启模组",
+        "unlocked_modules": list(modules.values()),
+    }
+
+
 def _operator_entry(char: dict[str, Any], char_info: dict[str, Any]) -> dict[str, Any]:
     """Build the display record for one owned operator.
 
@@ -51,6 +107,7 @@ def _operator_entry(char: dict[str, Any], char_info: dict[str, Any]) -> dict[str
     elite = int(char.get("evolvePhase") or 0)
     potential = int(char.get("potentialRank") or 0)
     return {
+        **training_summary(char),
         "char_id": char_id,
         "name": str(meta.get("name") or char_id),
         "profession": profession,
@@ -73,7 +130,9 @@ def _operator_entry(char: dict[str, Any], char_info: dict[str, Any]) -> dict[str
 
 
 def group_operators(
-    chars: list[dict[str, Any]], char_info: dict[str, Any]
+    chars: list[dict[str, Any]],
+    char_info: dict[str, Any],
+    equipment_info: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Group owned operators by profession for the roster card.
 
@@ -93,6 +152,7 @@ def group_operators(
         if char_id not in char_info:
             continue
         entry = _operator_entry(char, char_info)
+        entry.update(training_summary(char, equipment_info))
         buckets.setdefault(entry["profession"], []).append(entry)
 
     groups: list[dict[str, Any]] = []
@@ -202,17 +262,7 @@ def build_operator_context(
                 "is_default": skill_id == str(operator.get("default_skill_id") or ""),
             }
         )
-    equips = []
-    for equip in operator.get("equip") or []:
-        equip_id = str(equip.get("id") or "")
-        meta = equipment_info.get(equip_id) or {}
-        equips.append(
-            {
-                "id": equip_id,
-                "name": str(meta.get("name") or equip_id),
-                "level": int(equip.get("level") or 0),
-            }
-        )
+    equips = training_summary(operator, equipment_info)["unlocked_modules"]
     return {
         "name": operator.get("name") or char_id,
         "profession_cn": operator.get("profession_cn") or UNKNOWN_PROFESSION_CN,
