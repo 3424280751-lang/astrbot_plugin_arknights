@@ -925,6 +925,16 @@ class ArknightsPlugin(Star):
                 f"入职日期：{note['register_date']}",
                 f"主线进度：{note['main_stage']}",
                 f"干员 / 时装：{note['char_count']} / {note['skin_count']}",
+                f"精二干员：{note['elite2_count']} 位",
+                f"专三技能：{note['mastery3_count']} 个",
+                f"总收集模组：{note['module_count']} 个",
+                f"STAGE 3 模组：{note['module_stage3_count']} 个",
+                f"拥有模组干员：{note['module_operator_count']} 位",
+                f"助理 {note['secretary']['name']}：潜能 {note['secretary']['potential_level'] or '未知'}；{note['secretary']['mastery_text']}；{note['secretary']['module_text']}",
+                *(
+                    f"支援 {op['name']}：潜能 {op['potential_level'] or '未知'}；{op['mastery_text']}；{op['module_text']}"
+                    for op in note["assist"]
+                ),
                 f"理智：{note['sanity']['current']} / {note['sanity']['max']}"
                 f"（{note['sanity']['remaining_text']}）",
                 f"每日任务：{note['daily']['current']} / {note['daily']['total']}",
@@ -1198,7 +1208,9 @@ class ArknightsPlugin(Star):
             yield event.plain_result(await self._report_query_error(event, exc))
             return
         char_info = data.get("charInfoMap") or {}
-        groups = group_operators(data.get("chars") or [], char_info)
+        groups = group_operators(
+            data.get("chars") or [], char_info, data.get("equipmentInfoMap") or {}
+        )
         roster = build_roster_context(groups, char_info)
         image = await self._render("operator_list.html", {"roster": roster})
         if image is None:
@@ -1207,7 +1219,12 @@ class ArknightsPlugin(Star):
                 for group in groups
             )
             yield event.plain_result(
-                f"已持有干员 {roster['owned']} / {roster['total']}。\n{summary}"
+                f"已持有干员 {roster['owned']} / {roster['total']}。\n{summary}\n"
+                + "\n".join(
+                    f"{op['name']}：潜能 {op['potential_level'] or '未知'}；{op['mastery_text']}；{op['module_text']}"
+                    for group in groups
+                    for op in group["operators"]
+                )
             )
             return
         yield event.chain_result([Image.fromFileSystem(str(image))])
