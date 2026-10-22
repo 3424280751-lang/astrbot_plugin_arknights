@@ -1,3 +1,4 @@
+{% from "training_badges.html" import training %}
 <!doctype html>
 <html lang="zh-CN">
   <head>
@@ -39,7 +40,7 @@
       }
       .tile {
         position: relative;
-        width: 76px;
+        width: 110px;
       }
       .tile img {
         width: 70px;
@@ -89,6 +90,8 @@
         margin-top: 3px;
         letter-spacing: 0;
       }
+      .training { font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; color: var(--muted); margin-top: 4px; }
+      {% include "training_badges.css" %}
     </style>
   </head>
   <body>
@@ -98,6 +101,7 @@
         <div class="card-subtitle">Operator Roster</div>
       </div>
       <div class="stripes"></div>
+      <div class="training-legend">技能下方亮菱形 = 专精等级（0–3） · 模组六边形 I / II / III = 等级</div>
 
       <div class="owned-bar">
         <div class="owned-cell">已持有<b>{{ roster.owned }}</b></div>
@@ -124,6 +128,7 @@
             {% if op.elite %}<span class="elite">E{{ op.elite }}</span>{% endif %}
             <div class="stars">{{ "★" * op.stars }}</div>
             <div class="name">{{ op.name }}</div>
+            {{ training(op) }}
           </div>
           {% endfor %}
         </div>

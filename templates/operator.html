@@ -144,8 +144,9 @@
             {% elif not op.elite %}
             <span class="badge">未精英化</span>
             {% endif %}
+            <span style="font-size:12px;color:var(--muted)">潜能 {{ op.potential + 1 }}</span>
             {% if op.potential_icon %}
-            <img class="mark" src="{{ op.potential_icon }}" alt="潜能{{ op.potential }}" />
+            <img class="mark" src="{{ op.potential_icon }}" alt="潜能{{ op.potential + 1 }}" />
             {% endif %}
             <span class="badge hot">信赖 {{ op.favor }}%</span>
           </div>

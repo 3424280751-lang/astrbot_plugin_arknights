@@ -1,0 +1,18 @@
+{% macro training(op) %}
+<div class="training-badges">
+  <div class="potential-badge" title="潜能 {{ op.potential_level or '未知' }}">{% if op.potential_badge_icon %}<img class="potential-icon" src="{{ op.potential_badge_icon }}" alt="" />{% endif %}<span>潜能 {{ op.potential_level if op.potential_level else '未知' }}</span></div>
+  <div class="skill-badges">
+  {% for skill in op.mastery_badges %}
+    <div class="skill-badge" title="技能 {{ skill.slot }}：专精 {{ skill.level }}">
+      <span class="skill-picture">{% if skill.icon %}<img class="skill-icon" src="{{ skill.icon }}" alt="技能 {{ skill.slot }}" />{% else %}<span>S{{ skill.slot }}</span>{% endif %}<b class="skill-slot">{{ skill.slot }}</b></span>
+      <span class="mastery-rank" aria-label="专精 {{ skill.level }}">{% for n in range(1,4) %}<i class="rank-diamond{% if n <= skill.level %} filled{% endif %}"></i>{% endfor %}</span>
+    </div>
+  {% else %}<span class="training-empty">暂无技能数据</span>{% endfor %}
+  </div>
+  <div class="module-badges">
+  {% for module in op.unlocked_modules %}
+    <span class="module-badge" title="{{ module.name }}：模组等级 {{ module.level }}"><span class="module-hex">{{ ['','I','II','III'][module.level] if module.level >= 0 and module.level <= 3 else module.level }}</span><span class="module-name">{{ module.name }}</span></span>
+  {% else %}<span class="training-empty">无已开启模组</span>{% endfor %}
+  </div>
+</div>
+{% endmacro %}

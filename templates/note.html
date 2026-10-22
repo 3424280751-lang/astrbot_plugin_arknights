@@ -1,3 +1,4 @@
+{% from "training_badges.html" import training %}
 <!doctype html>
 <html lang="zh-CN">
   <head>
@@ -159,6 +160,8 @@
       .serial {
         letter-spacing: 1.2px;
       }
+      .training { font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; color: var(--muted); padding: 5px; }
+      {% include "training_badges.css" %}
     </style>
   </head>
   <body>
@@ -170,6 +173,7 @@
         </div>
       </div>
       <div class="stripes"></div>
+      <div class="training-legend">技能下方亮菱形 = 专精等级（0–3） · 模组六边形 I / II / III = 等级</div>
 
       <div class="body">
         <div class="assistant rarity-{{ note.secretary.stars }}">
@@ -191,6 +195,7 @@
             <img class="rank" src="{{ note.secretary.rarity_icon }}" alt="" style="margin-left: auto" />
             {% endif %}
           </div>
+          {{ training(note.secretary) }}
           {% if note.signature %}
           <div class="signature">{{ note.signature }}</div>
           {% endif %}
@@ -218,6 +223,15 @@
             </div>
           </div>
 
+          <div class="stat-strip">
+            <div class="stat-cell"><div class="stat-key">精二干员总数</div><div class="stat-val">{{ note.elite2_count }}</div></div>
+            <div class="stat-cell"><div class="stat-key">专三技能总数</div><div class="stat-val">{{ note.mastery3_count }}</div></div>
+          </div>
+          <div class="stat-strip">
+            <div class="stat-cell"><div class="stat-key">总收集模组</div><div class="stat-val">{{ note.module_count }}</div></div>
+            <div class="stat-cell"><div class="stat-key">STAGE 3 模组</div><div class="stat-val">{{ note.module_stage3_count }}</div></div>
+            <div class="stat-cell"><div class="stat-key">拥有模组干员</div><div class="stat-val">{{ note.module_operator_count }}</div></div>
+          </div>
           <div class="panel">
             <div class="section-title">理智</div>
             <div class="row">
@@ -261,6 +275,7 @@
               <div class="tile assist-op rarity-{{ op.stars }}" data-rarity="{{ op.stars }}">
                 <img src="{{ op.avatar }}" alt="{{ op.name }}" />
                 <div class="name">{{ op.name }}</div>
+                {{ training(op) }}
                 <div class="lv">Lv.{{ op.level }}</div>
               </div>
               {% endfor %}
