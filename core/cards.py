@@ -6,11 +6,13 @@ tested, and it keeps every ``core`` module free of AstrBot imports.
 
 from __future__ import annotations
 
+import random
 from datetime import datetime
 from typing import Any
 
 from .assets import (
     char_avatar,
+    owned_secretary_artworks,
     profession_icon,
     rarity_icon,
     secretary_portrait,
@@ -203,6 +205,17 @@ def build_note_context(
     secretary_id = str(secretary.get("charId") or "")
     secretary_meta = char_info.get(secretary_id) or {}
     secretary_stars = int(secretary_meta.get("rarity") or 0) + 1
+    artwork_pool = owned_secretary_artworks(
+        secretary_id,
+        int(owned_chars.get(secretary_id, {}).get("evolvePhase") or 0),
+        skins,
+        data.get("skinInfoMap") or {},
+    )
+    artwork = (
+        random.choice(artwork_pool)
+        if secretary_mode == "random" and artwork_pool
+        else None
+    )
 
     return {
         "nickname": status.get("name") or "",
@@ -218,9 +231,13 @@ def build_note_context(
             "char_id": secretary_id,
             "name": str(secretary_meta.get("name") or secretary_id),
             "stars": secretary_stars,
-            "portrait": secretary_portrait(
+            "portrait": artwork["url"]
+            if artwork
+            else secretary_portrait(
                 secretary_id, str(secretary.get("skinId") or ""), secretary_mode
             ),
+            "artwork_name": artwork["name"] if artwork else "",
+            "artwork_pool_size": len(artwork_pool),
             "profession_icon": profession_icon(
                 str(secretary_meta.get("profession") or "")
             ),

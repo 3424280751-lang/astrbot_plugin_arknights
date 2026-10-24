@@ -1,3 +1,11 @@
+## 0.4.6 custom · 2026-10-24
+
+- Preserve existing training statistics, artwork framing, query caching and sign-in recovery.
+- Render sign-in notifications as offline images with text fallback.
+- Add optional collision-aware Quill Easter eggs and two original Seaborn GIFs.
+- Add public MAA mirror and random GIF commands to both help formats.
+- Validate 188 tests on Windows plus command and rendering regression checks.
+
 # 更新日志
 
 本文件与 [README](README.md#-更新日志) 的更新日志章节同源，供 AstrBot 仪表盘的「更新日志」弹窗读取。

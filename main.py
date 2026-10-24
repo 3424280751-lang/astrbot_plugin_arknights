@@ -10,15 +10,19 @@ import asyncio
 import base64
 import html as html_module
 import io
+import json
 import random
 import re
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import qrcode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -42,6 +46,7 @@ from .core.gacha import GachaClient, GachaError, analyze, format_record_time
 from .core.gacha_store import GachaStore
 from .core.gamedata import GameData
 from .core.hypergryph import HypergryphClient, HypergryphError
+from .core.maa_mirror import MIRROR_PAGE, MAAMirror
 from .core.operators import (
     build_operator_context,
     build_roster_context,
@@ -49,6 +54,7 @@ from .core.operators import (
     group_operators,
 )
 from .core.render import Renderer
+from .core.sign_picture import render_sign_picture
 from .core.skland import SignInResult, SklandClient, SklandError, UserBinding
 from .core.store import Store
 
@@ -133,11 +139,22 @@ ark签到              手动执行森空岛签到
 ark订阅理智 / ark取消订阅理智  理智回满推送
 ark订阅签到 / ark取消订阅签到  群内签到结果通知
 
+【下载与彩蛋】
+/arkmaa              MAA 最新稳定版 Windows x64 镜像下载
+/ark海嗣             随机发送海嗣动图
+
 账号凭证仅保存在本机，且不会在任何回复中回显。
 """
 
 # Structured copy of HELP_TEXT used by the rendered help card.
 HELP_SECTIONS = [
+    {
+        "title": "下载与彩蛋",
+        "items": [
+            {"cmd": "/arkmaa", "desc": "MAA 最新稳定版 Windows x64 镜像下载"},
+            {"cmd": "/ark海嗣", "desc": "随机发送海嗣动图"},
+        ],
+    },
     {
         "title": "账号绑定",
         "items": [
@@ -210,6 +227,15 @@ class ArknightsPlugin(Star):
         self.skland = SklandClient()
         self.hypergryph = HypergryphClient()
         self._qr_tasks: set[asyncio.Task[None]] = set()
+        self._maa_mirror = MAAMirror()
+        try:
+            from astrbot.core.pipeline.waking_check.owner_command_policy import (
+                PUBLIC_COMMANDS,
+            )
+
+            PUBLIC_COMMANDS.setdefault(PLUGIN_NAME, set()).update({"arkmaa", "ark海嗣"})
+        except ImportError:
+            pass  # The optional deployment policy is not part of upstream AstrBot.
         self._templates_dir = Path(__file__).parent / "templates"
         self._renderer: Renderer | None = None
         self._base_css: str | None = None
@@ -227,6 +253,9 @@ class ArknightsPlugin(Star):
         # alert has already gone out for the current incident.
         self._health_failures = 0
         self._health_alerted = False
+        self._sign_lock = asyncio.Lock()
+        self._query_locks: dict[str, asyncio.Lock] = {}
+        self._credential_cache: dict[tuple[str, str], tuple[float, Any]] = {}
         self.scheduler: AsyncIOScheduler | None = None
 
     async def initialize(self) -> None:
@@ -240,7 +269,7 @@ class ArknightsPlugin(Star):
         hour, minute = self._parse_sign_time(self.config.get("sign_time", "00:05"))
         minutes = max(10, int(self.config.get("sanity_poll_interval", 20) or 20))
         try:
-            self.scheduler = AsyncIOScheduler()
+            self.scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
             self.scheduler.add_job(
                 self._auto_sign_job,
                 CronTrigger(hour=hour, minute=minute),
@@ -275,7 +304,37 @@ class ArknightsPlugin(Star):
                 replace_existing=True,
                 misfire_grace_time=300,
             )
+            self.scheduler.add_job(
+                self._recover_sign_job,
+                DateTrigger(
+                    run_date=datetime.now(ZoneInfo("Asia/Shanghai"))
+                    + timedelta(seconds=15)
+                ),
+                id="arknights_sign_startup_recovery",
+                replace_existing=True,
+            )
+            self.scheduler.add_job(
+                self._recover_sign_job,
+                IntervalTrigger(minutes=15),
+                id="arknights_sign_delivery_recovery",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
             self.scheduler.start()
+            test_request = self._sign_journal_path().with_name("sign_picture_test.json")
+            if test_request.exists():
+                test_data = json.loads(test_request.read_text(encoding="utf-8"))
+                picture = render_sign_picture(
+                    test_data["title"], test_data["lines"], test_request.parent
+                )
+                if await self._notify(
+                    test_data["umo"],
+                    "签到图片测试（使用已有签到记录，不重复执行签到）",
+                    image=picture,
+                ):
+                    test_request.unlink()
+                    logger.info("Sign picture private test delivered")
             logger.info(
                 "罗德岛终端定时任务已启动：签到 %02d:%02d，理智轮询每 %d 分钟，公告轮询每 %d 分钟",
                 hour,
@@ -362,6 +421,7 @@ class ArknightsPlugin(Star):
                 self._templates_dir,
                 cache_dir,
                 int(self.config.get("render_timeout", 30000) or 30000),
+                proxy_url=str(self.config.get("asset_proxy_url") or ""),
             )
         if self._base_css is None:
             try:
@@ -456,7 +516,7 @@ class ArknightsPlugin(Star):
         text: str,
         image: Path | str | None = None,
         mention: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Send a message to a session outside the current event flow.
 
         Args:
@@ -481,9 +541,11 @@ class ArknightsPlugin(Star):
                     )
                 except Exception as exc:  # noqa: BLE001 - drop the image, keep the text
                     logger.warning("图片构造失败，仅发送文本 (%s): %s", umo, exc)
-            await self.context.send_message(umo, MessageChain(chain))
+            sent = await self.context.send_message(umo, MessageChain(chain))
+            return sent is not False
         except Exception as exc:  # noqa: BLE001 - never let delivery break a job
             logger.warning("发送消息失败 (%s): %s", umo, exc)
+            return False
 
     async def _resolve_binding(
         self, event: AstrMessageEvent
@@ -559,6 +621,35 @@ class ArknightsPlugin(Star):
             yield event.plain_result(HELP_TEXT)
             return
         yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @filter.command("arkmaa")
+    async def maa_download(self, event: AstrMessageEvent):
+        """Return the mirror site's current stable full Windows x64 package."""
+        try:
+            info = await self._maa_mirror.latest(
+                str(self.config.get("asset_proxy_url") or "")
+            )
+            text = f"MAA {info['version']} · Windows x64 稳定版\n{info['filename']}\n镜像下载：\n{info['url']}\n来源：{MIRROR_PAGE}"
+            if info.get("sha256"):
+                text += "\nSHA256：" + info["sha256"]
+        except Exception as exc:
+            logger.warning("MAA mirror lookup failed: %s", type(exc).__name__)
+            text = "暂时无法取得最新下载直链，请打开镜像页面查看：\n" + MIRROR_PAGE
+        yield event.plain_result(text)
+
+    @filter.command("ark海嗣")
+    async def seaborn_gif(self, event: AstrMessageEvent):
+        """Send one of the two bundled original animated GIFs at random."""
+        folder = Path(__file__).parent / "assets" / "seaborn"
+        files = [
+            path
+            for path in (folder / "blue.gif", folder / "gray.gif")
+            if path.is_file()
+        ]
+        if not files:
+            yield event.plain_result("海嗣动图素材暂时不可用。")
+            return
+        yield event.image_result(str(random.choice(files)))
 
     @filter.command("ark绑定")
     async def bind_by_qr(self, event: AstrMessageEvent):
@@ -783,7 +874,23 @@ class ArknightsPlugin(Star):
 
     # ── data queries ──────────────────────────────────────────────────────
 
-    async def _player_data(
+    async def _player_data(self, user, binding, *, include_rogue=False):
+        uid = str(binding.get("uid") or "")
+        locks = getattr(self, "_query_locks", None)
+        if locks is None:
+            self._query_locks = locks = {}
+        async with locks.setdefault(uid, asyncio.Lock()):
+            started = time.monotonic()
+            data = await self._player_data_uncached(
+                user, binding, include_rogue=include_rogue
+            )
+            logger.info(
+                "[QueryTiming] player query completed in %.2fs",
+                time.monotonic() - started,
+            )
+            return data
+
+    async def _player_data_uncached(
         self,
         user: dict[str, Any],
         binding: dict[str, Any],
@@ -812,10 +919,21 @@ class ArknightsPlugin(Star):
             and (not include_rogue or "rogueCareerMap" in cached[1])
         ):
             return cached[1]
-        authorization = await self.skland.get_authorization(
-            str(user.get("token") or "")
-        )
-        cred = await self.skland.get_credential(authorization)
+        credentials = getattr(self, "_credential_cache", None)
+        if credentials is None:
+            self._credential_cache = credentials = {}
+        token = str(user.get("token") or "")
+        credential_key = (uid, token)
+        stored_credential = credentials.get(credential_key)
+        if stored_credential and stored_credential[0] > now:
+            cred = stored_credential[1]
+        else:
+            cred = await self.skland.get_credential(
+                await self.skland.get_authorization(token)
+            )
+            if len(credentials) > 100:
+                credentials.clear()
+            credentials[credential_key] = (now + 600, cred)
         data = (
             dict(cached[1])
             if cached and cached[0] > now
@@ -1002,6 +1120,8 @@ class ArknightsPlugin(Star):
         if result.success:
             awards = "、".join(result.awards) if result.awards else "无"
             return f"{name}：签到成功（{awards}）"
+        if "重复" in result.error or "已签到" in result.error:
+            return f"{name}：今日已签到（本次未取得原奖励记录）"
         return f"{name}：{result.error}"
 
     @filter.command("ark签到")
@@ -1021,13 +1141,15 @@ class ArknightsPlugin(Star):
         except SklandError as exc:
             yield event.plain_result(await self._report_query_error(event, exc))
             return
-        if result.success:
-            awards = "、".join(result.awards) if result.awards else "无"
-            yield event.plain_result(f"签到成功，获得：{awards}")
-        elif "已签到" in result.error or "重复" in result.error:
-            yield event.plain_result("今天已经签到过了，无需重复签到。")
-        else:
-            yield event.plain_result(f"签到失败：{result.error}")
+        text = self._sign_line(binding, result)
+        try:
+            image = render_sign_picture(
+                "森空岛签到结果", [text], self._sign_journal_path().parent
+            )
+            yield event.image_result(str(image))
+        except Exception as exc:
+            logger.warning("Sign picture failed: %s", type(exc).__name__)
+            yield event.plain_result(text)
 
     @filter.command("ark订阅理智")
     async def subscribe_sanity(self, event: AstrMessageEvent):
@@ -1107,41 +1229,98 @@ class ArknightsPlugin(Star):
             results.append((binding, result))
         return results
 
+    def _sign_journal_path(self) -> Path:
+        return Path(self.store._resolve_path()).with_name("sign_history.json")
+
+    def _read_sign_journal(self) -> dict:
+        path = self._sign_journal_path()
+        if not path.exists():
+            return {}
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _write_sign_journal(self, journal: dict) -> None:
+        path = self._sign_journal_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        journal = dict(sorted(journal.items())[-14:])
+        temp = path.with_suffix(".tmp")
+        temp.write_text(
+            json.dumps(journal, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temp.replace(path)
+
+    async def _recover_sign_job(self) -> None:
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        hour, minute = self._parse_sign_time(self.config.get("sign_time", "00:05"))
+        if (now.hour, now.minute) >= (hour, minute):
+            await self._auto_sign_job()
+
     async def _auto_sign_job(self) -> None:
-        """Sign in every bound account and deliver a summary.
-
-        Results go to the groups subscribed with ``ark订阅签到``; when no group is
-        subscribed they are sent privately to each account owner instead.
-        """
-        users = await self.store.all_users()
-        if not users:
-            return
-        groups = await self.store.list_sign_groups()
-        group_lines: list[str] = []
-        private: dict[str, list[str]] = {}
-
-        for user_key, user in users.items():
-            results = await self._sign_in_user(user_key, user)
-            for binding, result in results:
-                line = self._sign_line(binding, result)
-                if groups:
-                    group_lines.append(line)
-                else:
-                    private.setdefault(user_key, []).append(line)
-            # Spread requests out to avoid triggering rate limiting.
-            await asyncio.sleep(3 + random.random() * 3)
-
-        if groups and group_lines:
-            text = "森空岛自动签到结果\n" + "\n".join(group_lines)
-            for group in groups:
-                await self._notify(str(group.get("umo") or ""), text)
-            return
-
-        for user_key, lines in private.items():
-            umo = str((users.get(user_key) or {}).get("umo") or "")
-            if not umo:
-                continue
-            await self._notify(umo, "森空岛自动签到结果\n" + "\n".join(lines))
+        """Resume today's sign-ins and retry only undelivered summaries."""
+        async with self._sign_lock:
+            day = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+            journal = self._read_sign_journal()
+            record = journal.setdefault(day, {"users": {}, "delivered": []})
+            users = await self.store.all_users()
+            if not users:
+                return
+            for user_key, user in users.items():
+                if user_key in record["users"]:
+                    continue
+                try:
+                    results = await self._sign_in_user(user_key, user)
+                    lines = [
+                        self._sign_line(binding, result) for binding, result in results
+                    ]
+                    if not lines:
+                        lines = [
+                            f"{binding.get('nick_name') or '未知角色'}：凭证失效或未取得签到结果，请重新绑定"
+                            for binding in user.get("bindings") or []
+                        ]
+                except Exception as exc:
+                    logger.warning("[AutoSign] account failed (%s)", type(exc).__name__)
+                    lines = [
+                        f"{binding.get('nick_name') or '未知角色'}：签到请求失败，需稍后核查"
+                        for binding in user.get("bindings") or []
+                    ]
+                record["users"][user_key] = lines
+                self._write_sign_journal(journal)
+                await asyncio.sleep(3 + random.random() * 3)
+            groups = await self.store.list_sign_groups()
+            heading = f"森空岛自动签到结果 · {day}\n"
+            if groups:
+                lines = [line for values in record["users"].values() for line in values]
+                destinations = [
+                    (str(group.get("umo") or ""), heading + "\n".join(lines))
+                    for group in groups
+                ]
+            else:
+                destinations = [
+                    (
+                        str(user.get("umo") or ""),
+                        heading + "\n".join(record["users"].get(key, [])),
+                    )
+                    for key, user in users.items()
+                ]
+            for umo, text in destinations:
+                if not umo or umo in record["delivered"]:
+                    continue
+                try:
+                    title, _, body = text.partition("\n")
+                    picture = render_sign_picture(
+                        title, body.splitlines(), self._sign_journal_path().parent
+                    )
+                except Exception as exc:
+                    logger.warning("Sign picture failed: %s", type(exc).__name__)
+                    picture = None
+                delivered = (
+                    await self._notify(umo, "", image=picture)
+                    if picture
+                    else await self._notify(umo, text)
+                )
+                if delivered:
+                    record["delivered"].append(umo)
+                    self._write_sign_journal(journal)
+                    logger.info("[AutoSign] daily summary delivered: date=%s", day)
 
     async def _sanity_poll_job(self) -> None:
         """Notify subscribers whose sanity has just reached the cap.
@@ -2184,6 +2363,11 @@ class ArknightsPlugin(Star):
             return
         # 拦下这条消息，避免被主管道 LLM 抢答
         event.stop_event()
+        if cmd in {"arkmaa", "ark海嗣"}:
+            handler = self.maa_download if cmd == "arkmaa" else self.seaborn_gif
+            async for result in handler(event):
+                yield result
+            return
         yield event.plain_result(
             f"「{cmd}」要带唤醒前缀喵 (・_・?)\n"
             f"本群的指令前面要加 ~ ，所以是：~{cmd}\n"

@@ -276,3 +276,43 @@ def secretary_portrait(
         return (rng or _random).choice(pool)
     # elite1 (default), and the fallback for any unknown mode
     return char_portrait(char_id, 1)
+
+
+def owned_secretary_artworks(
+    char_id: str, evolve_phase: int, skins: list, skin_info: dict | None = None
+) -> list[dict[str, str]]:
+    """List only artwork unlocked for this owned operator."""
+    if not char_id:
+        return []
+    skin_info = skin_info or {}
+    pool = [
+        {"id": f"{char_id}#1", "name": "默认立绘", "url": skin_portrait(f"{char_id}#1")}
+    ]
+    if evolve_phase >= 2:
+        pool.append(
+            {
+                "id": f"{char_id}#2",
+                "name": "精二立绘",
+                "url": skin_portrait(f"{char_id}#2"),
+            }
+        )
+    seen = {item["id"] for item in pool}
+    for skin in skins or []:
+        skin_id = str(
+            (skin.get("id") or skin.get("skinId") or "")
+            if isinstance(skin, dict)
+            else skin
+        )
+        meta = skin_info.get(skin_id) or {}
+        belongs = meta.get("charId") == char_id or skin_id.startswith(char_id + "@")
+        if not belongs or "@" not in skin_id or skin_id in seen:
+            continue
+        pool.append(
+            {
+                "id": skin_id,
+                "name": str(meta.get("name") or "已拥有时装"),
+                "url": skin_portrait(skin_id),
+            }
+        )
+        seen.add(skin_id)
+    return pool

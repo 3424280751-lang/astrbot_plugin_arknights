@@ -44,7 +44,7 @@
       "随机图池"
     ],
     "default": "精一立绘",
-    "hint": "默认统一使用精一立绘；随机图池会在精一 / 精二 / 当前时装之间随机"
+    "hint": "随机图池仅从当前助理已解锁的默认/精二立绘与已拥有时装中选择，不会切换助理或抽取未拥有皮肤"
   },
   "gacha_cache_ttl": {
     "description": "抽卡记录缓存时间(秒)",
@@ -67,7 +67,10 @@
   "feed_source": {
     "description": "公告推送数据源",
     "type": "string",
-    "enum": ["selfhosted", "official"],
+    "enum": [
+      "selfhosted",
+      "official"
+    ],
     "default": "selfhosted",
     "hint": "selfhosted = 自建森空岛官方源（含 PV/EP 视频等官网没有的内容）；official = 官网公告源。自建源连续失败会自动降级到官网源"
   },
@@ -100,5 +103,11 @@
     "type": "string",
     "default": "",
     "hint": "填写接收告警的会话（如 coe:FriendMessage:12345）。留空则不启用健康看门狗；自建源异常时会私聊提醒，恢复后再通知一次"
+  },
+  "asset_proxy_url": {
+    "description": "公开图片资源代理",
+    "type": "string",
+    "default": "",
+    "hint": "留空直连；当立绘 CDN 无法解析或连接时可填写 http://127.0.0.1:端口。仅用于图片渲染，不改变森空岛请求。"
   }
 }

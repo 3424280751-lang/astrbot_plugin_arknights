@@ -60,10 +60,14 @@
         pointer-events: none;
       }
       .assistant-art img {
+        position: absolute;
+        inset: 0;
         width: 100%;
         height: 100%;
-        object-fit: contain;
-        object-position: center bottom;
+        box-sizing: border-box;
+        padding: 12px 6px;
+        object-fit: cover;
+        object-position: center top;
         display: block;
         filter: saturate(1.1) contrast(1.02);
       }
@@ -182,6 +186,7 @@
             <img src="{{ note.secretary.portrait }}" alt="{{ note.secretary.name }}" />
             {% endif %}
             <span class="tick"></span>
+            {% if note.secretary.artwork_name %}<span style="position:absolute;bottom:8px;right:8px;z-index:2;font-size:11px;color:var(--muted);background:#101521bb;padding:3px 6px;border-radius:3px">{{ note.secretary.artwork_name }}</span>{% endif %}
           </div>
           <div class="assistant-badge">
             {% if note.secretary.profession_icon %}
