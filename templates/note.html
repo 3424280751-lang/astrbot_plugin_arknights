@@ -172,7 +172,7 @@
     <div class="card {{ card_class }}">
       <div class="card-header">
         <div class="id-block">
-          <div class="id-name">{{ note.nickname or "未知博士" }}</div>
+          <div><div class="id-name">{{ note.nickname or "未知博士" }}</div><div style="font-size:12px;color:var(--muted);margin-top:5px">UID {{ note.uid }}</div></div>
           <div class="id-level">LEVEL<b>{{ note.level }}</b></div>
         </div>
       </div>
@@ -220,12 +220,15 @@
           <div class="stat-strip">
             <div class="stat-cell">
               <div class="stat-key">干员数量</div>
-              <div class="stat-val">{{ note.char_count }}</div>
+              <div class="stat-val">{{ note.roster.owned }} / {{ note.roster.total }}（{{ "%.1f" | format(note.roster.owned_percent) }}%）</div>
             </div>
             <div class="stat-cell">
               <div class="stat-key">时装数量</div>
               <div class="stat-val">{{ note.skin_count }}</div>
             </div>
+          </div>
+          <div class="progress" style="margin: 2px 0 12px;">
+            <div class="progress-fill" style="width: {{ note.roster.owned_percent }}%"></div>
           </div>
 
           <div class="stat-strip">

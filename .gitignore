@@ -24,3 +24,7 @@ render_cache/
 plugin_data/
 *.bak
 .DS_Store
+
+# Runtime output and dated source backups
+data/
+*.bak-*

@@ -218,21 +218,40 @@ def find_operator(
 
 
 def build_roster_context(
-    groups: list[dict[str, Any]], char_info: dict[str, Any]
+    groups: list[dict[str, Any]],
+    char_info: dict[str, Any],
+    total_override: int | None = None,
 ) -> dict[str, Any]:
     """Build the roster card context.
 
     Args:
         groups: Output of :func:`group_operators`.
-        char_info: The ``charInfoMap`` section, used for the owned total.
+        char_info: The ``charInfoMap`` section, used for the deduplicated operator total.
 
     Returns:
         Template context for ``operator_list.html``.
     """
+    owned = len(
+        {
+            (char_info.get(op["char_id"]) or {}).get("name") or op["char_id"]
+            for group in groups
+            for op in group["operators"]
+        }
+    )
+    total = len(
+        {
+            meta.get("name") or char_id
+            for char_id, meta in (char_info or {}).items()
+            if meta.get("profession") not in {"TOKEN", "TRAP"}
+        }
+    )
+    if total_override is not None:
+        total = total_override
     return {
         "groups": groups,
-        "owned": sum(len(group["operators"]) for group in groups),
-        "total": len(char_info or {}),
+        "owned": owned,
+        "total": total,
+        "owned_percent": round(owned / total * 100, 1) if total else 0.0,
     }
 
 

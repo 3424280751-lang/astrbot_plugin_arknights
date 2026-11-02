@@ -63,33 +63,6 @@
         background: linear-gradient(135deg, var(--theme), var(--theme-2));
         padding: 0 4px;
       }
-      .owned-bar {
-        display: flex;
-        gap: 0;
-        border: 1px solid var(--line);
-        margin-bottom: 20px;
-        border-radius: 7px;
-        overflow: hidden;
-        background: rgba(13, 15, 24, 0.66);
-      }
-      .owned-cell {
-        flex: 1;
-        padding: 9px 14px;
-        border-right: 1px solid var(--line);
-        font-size: 11px;
-        color: var(--muted);
-        letter-spacing: 1.2px;
-      }
-      .owned-cell:last-child {
-        border-right: none;
-      }
-      .owned-cell b {
-        display: block;
-        font-size: 20px;
-        color: var(--text);
-        margin-top: 3px;
-        letter-spacing: 0;
-      }
       .training { font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; color: var(--muted); margin-top: 4px; }
       {% include "training_badges.css" %}
     </style>
@@ -97,18 +70,16 @@
   <body>
     <div class="card {{ card_class }}">
       <div class="card-header">
-        <div class="card-title">干员图鉴</div>
-        <div class="card-subtitle">Operator Roster</div>
+        <div>
+          <div class="card-title">干员列表</div>
+          <div class="card-subtitle">已收集 {{ roster.owned }} / 全干员 {{ roster.total }}（{{ "%.1f" | format(roster.owned_percent) }}%）</div>
+        </div>
       </div>
       <div class="stripes"></div>
       <div class="training-legend">技能下方亮菱形 = 专精等级（0–3） · 模组六边形 I / II / III = 等级</div>
 
-      <div class="owned-bar">
-        <div class="owned-cell">已持有<b>{{ roster.owned }}</b></div>
-        <div class="owned-cell">图鉴总数<b>{{ roster.total }}</b></div>
-        <div class="owned-cell">
-          收集率<b>{{ (roster.owned * 100 // roster.total) if roster.total else 0 }}%</b>
-        </div>
+      <div class="progress">
+        <div class="progress-fill" style="width: {{ roster.owned_percent }}%"></div>
       </div>
 
       {% if roster.groups %}
@@ -139,7 +110,7 @@
       {% endif %}
 
       <div class="card-footer">
-        <span>© HYPERGRYPH · E1 / E2 为精英化阶段，星级为干员稀有度</span>
+        <span>© HYPERGRYPH · E1 / E2 为精英化阶段，星级为干员稀有度<br />总数来自 PRTS 干员一览，每日自动更新</span>
         <span><span class="barcode"></span><span class="serial">RI-ROSTER-001</span></span>
       </div>
     </div>

@@ -13,15 +13,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import mimetypes
 import re
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote, urlsplit
 
 import jinja2
 from astrbot.api import logger
+from PIL import Image
 
 from .easter_eggs import decorate_html
 
@@ -33,6 +36,7 @@ CACHE_MAX_AGE_SECONDS = 300
 CARD_THEMES: dict[str, str] = {
     "help.html": "t-help",
     "note.html": "t-profile",
+    "dps.html": "t-profile",
     "sanity.html": "t-sanity",
     "operator.html": "t-operator",
     "gacha.html": "t-gacha",
@@ -72,7 +76,7 @@ def _capture_is_usable(path: Path) -> bool:
 
 
 class Renderer:
-    """Render Jinja2 templates to JPEG cards."""
+    """Render Jinja2 templates to image cards."""
 
     def __init__(
         self,
@@ -102,7 +106,10 @@ class Renderer:
         self._playwright: Any = None
         self._browser: Any = None
         self._image_cache: dict[str, tuple[bytes, str]] = {}
-        self._image_slots = asyncio.Semaphore(12)
+        self._mirror_attempts: dict[str, list[str]] = {}
+        self._basename_index = None
+        self._index_lock = asyncio.Lock()
+        self._image_slots = asyncio.Semaphore(24)
         self._portrait_bounds: dict[str, tuple] = {}
         self._portrait_focus: dict[str, float] = {}
 
@@ -137,6 +144,90 @@ class Renderer:
         async with self._lock:
             await self._stop_locked()
 
+    async def prewarm_avatars(self, store, client) -> None:
+        """Warm bound accounts' avatar cache without blocking plugin startup.
+
+        Args:
+            store: Read-only binding store interface.
+            client: Skland client used to fetch current owned operators.
+        """
+        from .assets import char_avatar
+
+        context = None
+        try:
+            users = await store.all_users()
+            if not users or not await self.start():
+                return
+            context = await self._browser.new_context(
+                **({"proxy": {"server": self.proxy_url}} if self.proxy_url else {})
+            )
+            slots = asyncio.Semaphore(6)
+
+            async def warm_route(route):
+                async with slots:
+                    await self._cached_image_route(route)
+
+            await context.route("**/*", warm_route)
+            for user in users.values():
+                try:
+                    authorization = await asyncio.wait_for(
+                        client.get_authorization(user["token"]), 30
+                    )
+                    credential = await asyncio.wait_for(
+                        client.get_credential(authorization), 30
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Avatar warmup authorization failed: %s", type(exc).__name__
+                    )
+                    continue
+                for binding in user.get("bindings") or []:
+                    page = None
+                    try:
+                        data = await asyncio.wait_for(
+                            client.get_player_info(credential, str(binding["uid"])), 40
+                        )
+                        urls = {
+                            char_avatar(str(char["charId"]))
+                            for char in data.get("chars") or []
+                            if char.get("charId")
+                        }
+                        page = await context.new_page()
+                        await page.set_content(
+                            "".join(f'<img src="{url}">' for url in urls),
+                            wait_until="domcontentloaded",
+                        )
+                        await page.wait_for_function(
+                            "() => Array.from(document.images).every(img => img.complete)",
+                            timeout=180000,
+                        )
+                        missing = await page.evaluate(
+                            "() => Array.from(document.images).filter(img => !img.naturalWidth).length"
+                        )
+                        if missing:
+                            logger.warning("Avatar warmup missed %s images", missing)
+                    except Exception as exc:
+                        logger.warning("Avatar warmup failed: %s", type(exc).__name__)
+                    finally:
+                        if page is not None:
+                            try:
+                                await page.close()
+                            except Exception as exc:
+                                logger.warning(
+                                    "Avatar warmup page cleanup failed: %s",
+                                    type(exc).__name__,
+                                )
+        except Exception as exc:
+            logger.warning("Avatar warmup failed: %s", type(exc).__name__)
+        finally:
+            if context is not None:
+                try:
+                    await context.close()
+                except Exception as exc:
+                    logger.warning(
+                        "Avatar warmup context cleanup failed: %s", type(exc).__name__
+                    )
+
     async def _stop_locked(self) -> None:
         """Tear down browser and playwright; caller must hold the lock."""
         if self._browser is not None:
@@ -156,9 +247,21 @@ class Renderer:
         """Delete rendered images older than the cache window."""
         cutoff = time.time() - CACHE_MAX_AGE_SECONDS
         try:
-            for path in self.cache_dir.glob("render_*.jpg"):
+            for path in self.cache_dir.glob("render_*.[jp][pn]g"):
                 if path.stat().st_mtime < cutoff:
                     path.unlink(missing_ok=True)
+            for path in (self.cache_dir / "public_assets").glob("*.failed"):
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            files = sorted(
+                (self.cache_dir / "public_assets").glob("*.bin"),
+                key=lambda f: f.stat().st_mtime,
+            )
+            total = sum(f.stat().st_size for f in files)
+            while files and (len(files) > 2048 or total > 256 * 1024 * 1024):
+                oldest = files.pop(0)
+                total -= oldest.stat().st_size
+                oldest.unlink(missing_ok=True)
         except OSError as exc:
             logger.debug("清理渲染缓存失败: %s", exc)
 
@@ -190,6 +293,94 @@ class Renderer:
 
         return ASSET_PATTERN.sub(replace, html)
 
+    async def _public_image_candidates(self, url, route):
+        """Resolve public mirrors, using a seven-day basename index.
+
+        Args:
+            url: Original image URL.
+            route: Playwright route for bounded index downloads.
+
+        Returns:
+            Ordered download URLs.
+        """
+        urls = [url]
+        resource = "https://cdn.jsdelivr.net/gh/yuanyan3060/ArknightsGameResource@main"
+        if url.startswith("https://torappu.prts.wiki/assets/"):
+            path = unquote(urlsplit(url).path).removeprefix("/assets/")
+            name = Path(path).name
+            if path.startswith("char_portrait/"):
+                urls.insert(0, f"{resource}/portrait/{quote(name)}")
+            elif path.startswith("char_avatar/"):
+                urls.insert(
+                    0,
+                    f"https://cdn.jsdelivr.net/gh/Aceship/Arknight-Images@main/avatars/{quote(name)}",
+                )
+                # Some forms only ship an elite-2 avatar, such as medic Amiya.
+                urls.append(
+                    f"https://torappu.prts.wiki/assets/char_avatar/{quote(Path(name).stem)}_2.png"
+                )
+            else:
+                async with self._index_lock:
+                    if self._basename_index is None:
+                        self._basename_index = {}
+                        index_path = (
+                            self.cache_dir / "public_assets/basename_index.json"
+                        )
+                        try:
+                            if (
+                                index_path.is_file()
+                                and time.time() - index_path.stat().st_mtime < 7 * 86400
+                            ):
+                                self._basename_index = json.loads(
+                                    index_path.read_text(encoding="utf-8")
+                                )
+                            else:
+                                response = await route.request.frame.page.context.request.get(
+                                    "https://data.jsdelivr.com/v1/packages/gh/yuanyan3060/ArknightsGameResource@main",
+                                    timeout=12000,
+                                )
+                                if response.status != 200:
+                                    raise ValueError(f"Index HTTP {response.status}")
+                                payload = await response.json()
+                                pending = [("", payload.get("files", []))]
+                                while pending:
+                                    prefix, files = pending.pop()
+                                    for entry in files:
+                                        relative = prefix + entry["name"]
+                                        if entry["type"] == "directory":
+                                            pending.append(
+                                                (relative + "/", entry.get("files", []))
+                                            )
+                                        else:
+                                            self._basename_index.setdefault(
+                                                entry["name"], []
+                                            ).append(relative)
+                                index_path.parent.mkdir(parents=True, exist_ok=True)
+                                temporary = index_path.with_suffix(
+                                    f".{uuid.uuid4().hex}.tmp"
+                                )
+                                temporary.write_text(
+                                    json.dumps(self._basename_index), encoding="utf-8"
+                                )
+                                temporary.replace(index_path)
+                        except Exception as exc:
+                            logger.warning("Public asset index unavailable: %s", exc)
+                urls.extend(
+                    f"{resource}/{quote(relative)}"
+                    for relative in self._basename_index.get(name, [])
+                )
+        for candidate in list(urls):
+            match = re.match(
+                r"https://cdn\.jsdelivr\.net/gh/([^/]+)/([^@/]+)@([^/]+)/(.*)",
+                candidate,
+            )
+            if match:
+                owner, repo, ref, path = match.groups()
+                urls.append(
+                    f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}"
+                )
+        return urls
+
     async def _cached_image_route(self, route) -> None:
         request = route.request
         if request.resource_type != "image" or not request.url.startswith("https://"):
@@ -204,6 +395,14 @@ class Renderer:
             )
         )
         disk = asset_dir / (hashlib.sha256(request.url.encode()).hexdigest() + ".bin")
+        failed_disk = disk.with_suffix(".failed")
+        if not cached and public_asset and failed_disk.is_file():
+            try:
+                if time.time() - failed_disk.stat().st_mtime < CACHE_MAX_AGE_SECONDS:
+                    await route.abort()
+                    return
+            except OSError as exc:
+                logger.warning("Failed to read public image failure cache: %s", exc)
         if not cached and public_asset and disk.is_file():
             try:
                 if time.time() - disk.stat().st_mtime < 7 * 86400:
@@ -216,20 +415,14 @@ class Renderer:
                 body, content_type = cached
             else:
                 async with self._image_slots:
-                    urls = [request.url]
-                    match = re.match(
-                        r"https://cdn\.jsdelivr\.net/gh/([^/]+)/([^@/]+)@([^/]+)/(.*)",
-                        request.url,
-                    )
-                    if match:
-                        owner, repo, ref, path = match.groups()
-                        urls.append(
-                            f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}"
-                        )
+                    urls = await self._public_image_candidates(request.url, route)
+                    attempts = []
+                    self._mirror_attempts[request.url] = attempts
                     body = b""
                     for url in urls:
                         try:
                             response = await route.fetch(url=url, timeout=12000)
+                            attempts.append(f"{url}: HTTP {response.status}")
                             content_type = response.headers.get(
                                 "content-type", "image/png"
                             ).split(";")[0]
@@ -238,9 +431,19 @@ class Renderer:
                             ):
                                 body = await response.body()
                                 break
-                        except Exception:
+                        except Exception as exc:
+                            attempts.append(f"{url}: {type(exc).__name__}")
                             continue
                     if not body:
+                        logger.warning("Public image download failed: %s", request.url)
+                        if public_asset:
+                            try:
+                                asset_dir.mkdir(exist_ok=True)
+                                failed_disk.touch()
+                            except OSError as exc:
+                                logger.warning(
+                                    "Failed to cache public image failure: %s", exc
+                                )
                         await route.abort()
                         return
                 if public_asset and len(body) <= 4_000_000:
@@ -251,17 +454,13 @@ class Renderer:
                             content_type.encode("ascii") + b"\n" + body
                         )
                         temporary.replace(disk)
-                        files = sorted(
-                            asset_dir.glob("*.bin"), key=lambda f: f.stat().st_mtime
-                        )
-                        total = sum(f.stat().st_size for f in files)
-                        while files and (len(files) > 128 or total > 64 * 1024 * 1024):
-                            oldest = files.pop(0)
-                            total -= oldest.stat().st_size
-                            oldest.unlink(missing_ok=True)
+                        failed_disk.unlink(missing_ok=True)
                     except OSError:
                         pass
-            if "/skin/" in request.url and request.url not in self._portrait_bounds:
+            if (
+                any(part in request.url for part in ("/skin/", "/char_portrait/"))
+                and request.url not in self._portrait_bounds
+            ):
                 try:
                     from io import BytesIO
 
@@ -366,14 +565,15 @@ class Renderer:
             "(element, style) => Object.assign(element.style, style)", style
         )
 
-    async def _load_card_page(self, context, html):
+    async def _load_card_page(self, context, html, timeout_ms=None):
         await context.route("**/*", self._cached_image_route)
         page = await context.new_page()
         await page.set_content(
             html, wait_until="domcontentloaded", timeout=self.timeout_ms
         )
         await page.evaluate(
-            "() => Promise.race([Promise.all(Array.from(document.images).map(img => img.complete ? null : new Promise(resolve => { img.onload = resolve; img.onerror = resolve; }))), new Promise(resolve => setTimeout(resolve, 25000))])"
+            "timeout => Promise.race([Promise.all(Array.from(document.images).map(img => img.complete ? null : new Promise(resolve => { img.onload = resolve; img.onerror = resolve; }))), new Promise(resolve => setTimeout(resolve, timeout))])",
+            timeout_ms or 25000,
         )
         await self._fit_secretary_artwork(page)
         return page
@@ -381,7 +581,7 @@ class Renderer:
     async def render_html(
         self, template_name: str, data: dict[str, Any]
     ) -> Path | None:
-        """Render a template to a JPEG file.
+        """Render a template to an image file.
 
         Args:
             template_name: Template filename relative to ``templates_dir``.
@@ -407,7 +607,7 @@ class Renderer:
             return None
 
         self._prune_cache()
-        output = self.cache_dir / f"render_{uuid.uuid4().hex[:8]}.jpg"
+        output = self.cache_dir / f"render_{uuid.uuid4().hex[:8]}.png"
         page = None
         context = None
         try:
@@ -416,7 +616,9 @@ class Renderer:
                 **({"proxy": {"server": self.proxy_url}} if self.proxy_url else {}),
                 viewport={"width": 1000, "height": 800},
             )
-            page = await self._load_card_page(context, html)
+            page = await self._load_card_page(
+                context, html, 115000 if template_name == "operator_list.html" else None
+            )
             # Chromium caps screenshots at 16384px of texture, so a tall page
             # rendered at 2x would be silently truncated past 8192 CSS px.
             # Measure first and drop to 1x when the page is too tall.
@@ -434,7 +636,11 @@ class Renderer:
                     viewport={"width": 1000, "height": 800},
                     **({"proxy": {"server": self.proxy_url}} if self.proxy_url else {}),
                 )
-                page = await self._load_card_page(context, html)
+                page = await self._load_card_page(
+                    context,
+                    html,
+                    115000 if template_name == "operator_list.html" else None,
+                )
                 box = await page.locator("body > *").first.bounding_box()
             if box and box["height"] > MAX_CARD_PX:
                 logger.info(
@@ -452,11 +658,23 @@ class Renderer:
                 except Exception as exc:
                     logger.debug("Optional easter egg skipped: %s", type(exc).__name__)
                 await page.screenshot(
-                    path=str(output), clip=box, type="jpeg", quality=85
+                    path=str(output), clip=box, type="png"
                 )
             else:
                 await page.screenshot(
-                    path=str(output), full_page=True, type="jpeg", quality=85
+                    path=str(output), full_page=True, type="png"
+                )
+            failed = await page.evaluate(
+                "() => Array.from(document.images).filter(img => img.naturalWidth === 0).map(img => img.src)"
+            )
+            image_count = await page.locator("img").count()
+            if image_count and len(failed) > image_count / 2:
+                logger.warning(
+                    "Card images failed (%s/%s): %s; mirror attempts: %s",
+                    len(failed),
+                    image_count,
+                    failed[:3],
+                    {url: self._mirror_attempts.get(url, []) for url in failed[:3]},
                 )
             if not _capture_is_usable(output):
                 logger.error(
@@ -466,6 +684,13 @@ class Renderer:
                 )
                 output.unlink(missing_ok=True)
                 return None
+            with Image.open(output) as image:
+                if output.stat().st_size > 5 * 1024 * 1024 or image.height > 8000:
+                    jpeg_output = output.with_suffix(".jpg")
+                    image.convert("RGB").save(
+                        jpeg_output, "JPEG", quality=88, optimize=True
+                    )
+                    output = jpeg_output
             return output
         except Exception as exc:  # noqa: BLE001 - degrade to text output
             logger.error("渲染 %s 截图失败: %s", template_name, exc)

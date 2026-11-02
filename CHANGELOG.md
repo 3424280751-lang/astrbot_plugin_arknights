@@ -1,3 +1,11 @@
+## 0.4.6 custom · 2026-11-02
+
+- 新增干员 DPS、总伤查询工具和数据卡片。
+- 新增 PRTS 干员名录读取、收集进度百分比与干员计数回归测试。
+- 更新便签、干员列表、图片资源镜像与渲染逻辑。
+- 同步签到群通知、签到恢复与相关测试。
+- 最新源码下载改为 main 分支归档，保留旧 ZIP 作为历史备份。
+
 ## 0.4.6 custom · 2026-10-24
 
 - Preserve existing training statistics, artwork framing, query caching and sign-in recovery.

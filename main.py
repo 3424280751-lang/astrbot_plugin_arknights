@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import httpx
 import qrcode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -32,6 +33,7 @@ from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
+from . import dps_tool
 from .core.announce import AnnounceClient, AnnounceError
 from .core.cards import build_note_context, build_sanity_context
 from .core.daily import (
@@ -53,6 +55,7 @@ from .core.operators import (
     find_operator,
     group_operators,
 )
+from .core.prts import get_total
 from .core.render import Renderer
 from .core.sign_picture import render_sign_picture
 from .core.skland import SignInResult, SklandClient, SklandError, UserBinding
@@ -117,6 +120,10 @@ ark理智              理智与回满时间
 ark干员列表          已持有干员图鉴
 ark干员 <干员名>      单个干员详情
 
+【DPS 查询】
+arkdps <干员>        DPS / 总伤 / 榜单排名（出图）
+arkdps <干员> <技能> 指定技能序号或技能名片段，如 arkdps 能天使 3
+
 【日常玩法】
 ark基建              基建设施与干员心情
 ark剿灭              剿灭作战与本周合成玉
@@ -171,6 +178,16 @@ HELP_SECTIONS = [
             {"cmd": "ark理智", "desc": "理智与回满时间"},
             {"cmd": "ark干员列表", "desc": "已持有干员图鉴"},
             {"cmd": "ark干员 <干员名>", "desc": "单个干员详情"},
+        ],
+    },
+    {
+        "title": "DPS 查询",
+        "items": [
+            {"cmd": "arkdps <干员>", "desc": "DPS / 总伤 / 榜单排名（出图）"},
+            {
+                "cmd": "arkdps <干员> <技能>",
+                "desc": "指定技能序号或技能名片段，如 arkdps 能天使 3",
+            },
         ],
     },
     {
@@ -256,10 +273,37 @@ class ArknightsPlugin(Star):
         self._sign_lock = asyncio.Lock()
         self._query_locks: dict[str, asyncio.Lock] = {}
         self._credential_cache: dict[tuple[str, str], tuple[float, Any]] = {}
+        self._avatar_task: asyncio.Task | None = None
+        self._dps_task: asyncio.Task | None = None
         self.scheduler: AsyncIOScheduler | None = None
+        self._prts_total: int | None = None
+
+    async def _refresh_prts_total(self) -> None:
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as session:
+                total, _ = await get_total(
+                    Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME, session
+                )
+            self._prts_total = total
+        except Exception:
+            pass
+        if self._prts_total is None:
+            logger.warning(
+                "PRTS total unavailable without cache; using Skland operator total"
+            )
 
     async def initialize(self) -> None:
         """Start the automatic sign-in and sanity polling jobs."""
+        await self._refresh_prts_total()
+        self._dps_task = asyncio.create_task(self._warm_dps_cache())
+        self._renderer = Renderer(
+            self._templates_dir,
+            Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME / "render_cache",
+            proxy_url=str(self.config.get("asset_proxy_url") or ""),
+        )
+        self._avatar_task = asyncio.create_task(
+            self._renderer.prewarm_avatars(self.store, self.skland)
+        )
         # The self-hosted source is preferred; the website source stays as the
         # fallback and is also what `feed_source: official` selects outright.
         self._feed = FeedClient(
@@ -270,6 +314,13 @@ class ArknightsPlugin(Star):
         minutes = max(10, int(self.config.get("sanity_poll_interval", 20) or 20))
         try:
             self.scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+            self.scheduler.add_job(
+                self._refresh_prts_total,
+                IntervalTrigger(hours=24),
+                id="arknights_prts_total",
+                replace_existing=True,
+                misfire_grace_time=3600,
+            )
             self.scheduler.add_job(
                 self._auto_sign_job,
                 CronTrigger(hour=hour, minute=minute),
@@ -335,6 +386,59 @@ class ArknightsPlugin(Star):
                 ):
                     test_request.unlink()
                     logger.info("Sign picture private test delivered")
+            group_test_request = self._sign_journal_path().with_name(
+                "group_sign_test_request.json"
+            )
+            if group_test_request.exists():
+                processing = group_test_request.with_suffix(".processing")
+                group_test_request.replace(processing)
+                test = json.loads(processing.read_text(encoding="utf-8"))
+                from .core.sign_groups import group_sign_destinations
+
+                test_day = str(test["day"])
+                test_records = (
+                    self._read_sign_journal().get(test_day, {}).get("users", {})
+                )
+                test_users = await self.store.all_users()
+                test_groups = await self.store.list_sign_groups()
+                if test.get("only_groups"):
+                    test_groups = [
+                        g
+                        for g in test_groups
+                        if str(g.get("group_id")) in test["only_groups"]
+                    ]
+                diagnostics = []
+                test_destinations = await group_sign_destinations(
+                    self.context,
+                    test_users,
+                    test_records,
+                    test_groups,
+                    "森空岛签到记录 · " + test_day,
+                    diagnostics=diagnostics,
+                )
+                receipt = {
+                    "id": test["id"],
+                    "day": test_day,
+                    "subscribed_groups": len(test_groups),
+                    "eligible_groups": len(test_destinations),
+                    "sent": [],
+                    "failed": [],
+                    "diagnostics": diagnostics,
+                }
+                receipt_path = processing.with_name("group_sign_test_result.json")
+                receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+                for target, report in [] if test.get("dry_run") else test_destinations:
+                    title, _, body = report.partition("\n")
+                    try:
+                        picture = render_sign_picture(
+                            title, body.splitlines(), self._sign_journal_path().parent
+                        )
+                        accepted = await self._notify(target, "", image=picture)
+                    except Exception:
+                        accepted = False
+                    receipt["sent" if accepted else "failed"].append(target)
+                    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+                processing.unlink()
             logger.info(
                 "罗德岛终端定时任务已启动：签到 %02d:%02d，理智轮询每 %d 分钟，公告轮询每 %d 分钟",
                 hour,
@@ -367,6 +471,14 @@ class ArknightsPlugin(Star):
 
     async def terminate(self) -> None:
         """Release network resources and cancel background tasks."""
+        if self._avatar_task is not None:
+            self._avatar_task.cancel()
+            await asyncio.gather(self._avatar_task, return_exceptions=True)
+            self._avatar_task = None
+        if self._dps_task is not None:
+            self._dps_task.cancel()
+            await asyncio.gather(self._dps_task, return_exceptions=True)
+            self._dps_task = None
         if self.scheduler is not None:
             try:
                 self.scheduler.shutdown(wait=False)
@@ -385,6 +497,108 @@ class ArknightsPlugin(Star):
         await self._gacha.close()
         await self._announce.close()
         await self._feed.close()
+
+    async def _warm_dps_cache(self) -> None:
+        """Refresh expired DPS data without blocking plugin initialization."""
+        try:
+            await dps_tool.load_rows()
+        except Exception as exc:
+            logger.warning("[ark-dps] Startup refresh failed: %s", exc)
+
+    @filter.llm_tool(name="ark_dps")
+    async def ark_dps(self, event: AstrMessageEvent, 干员: str, 技能: str = ""):
+        """查询明日方舟干员技能的 DPS、总伤和榜单排名。
+
+        Args:
+            干员(string): 干员名，可用简称。
+            技能(string): 可选，技能序号(1/2/3)或技能名片段。
+        """
+        image, text, title = await self._dps_card(干员, 技能)
+        if image is None:
+            return text
+        try:
+            await event.send(event.chain_result([Image.fromFileSystem(str(image))]))
+        except Exception as exc:
+            logger.warning("[ark-dps] Image delivery failed: %s", exc)
+            return text
+        return f"已把 DPS 卡发出去（{title}）"
+
+    @filter.command("arkdps")
+    async def show_dps(self, event: AstrMessageEvent, 干员: str = "", 技能: str = ""):
+        """Show a DPS card or a text candidate list."""
+        image, text, _ = await self._dps_card(干员, 技能)
+        if image is None:
+            yield event.plain_result(text)
+        else:
+            yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    async def _dps_card(self, operator: str, skill: str = ""):
+        """Resolve a query and render its unique result.
+
+        Args:
+            operator: Operator name or fragment.
+            skill: Optional skill number or name fragment.
+
+        Returns:
+            Image path, fallback text and resolved title.
+        """
+        if not operator.strip():
+            return None, "用法：arkdps <干员> [技能序号或技能名片段]", ""
+        try:
+            data = await asyncio.wait_for(dps_tool.load_rows(), timeout=65)
+            rows = data["rows"]
+            result = dps_tool.query(rows, operator, skill)
+            stale = "（站点刷新失败，以下使用过期缓存）\n" if data["stale"] else ""
+            if not result["candidates"]:
+                return (
+                    None,
+                    stale
+                    + f"没在 ark-dps 榜上找到「{operator}」，请检查干员名和技能。",
+                    "",
+                )
+            if result["matched"] is None:
+                text = (
+                    stale
+                    + "找到多个候选，请指定完整干员名和技能：\n"
+                    + "\n".join(
+                        f"{r['干员']}：DPS {r['DPS']} / 排名 {r['DPS排名']} / {len(rows)}"
+                        for r in result["candidates"][:6]
+                    )
+                )
+                return None, text, ""
+            row = result["matched"]
+            title = re.sub(r"^(.*?)([123])(.*)$", r"\1 · \2技能「\3」", row["干员"])
+            updated = datetime.fromtimestamp(data["fetched_at"]).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+            text = (
+                stale
+                + title
+                + "\n"
+                + " / ".join(f"{key} {row[key]}" for key in dps_tool.COLUMNS[1:])
+                + f" / 共 {len(rows)} 条"
+            )
+            try:
+                image = await asyncio.wait_for(
+                    self._render(
+                        "dps.html",
+                        {
+                            "dps": row,
+                            "title": title,
+                            "total": len(rows),
+                            "updated": updated,
+                            "stale": data["stale"],
+                        },
+                    ),
+                    timeout=45,
+                )
+            except Exception as exc:
+                logger.warning("[ark-dps] Card rendering failed: %s", exc)
+                image = None
+            return image, text, title
+        except Exception as exc:
+            logger.warning("[ark-dps] Query failed: %s", exc)
+            return None, "查 DPS 的站点现在连不上，稍后再试。", ""
 
     # ── helpers ───────────────────────────────────────────────────────────
 
@@ -436,7 +650,14 @@ class ArknightsPlugin(Star):
             "version": PLUGIN_VERSION,
         }
         payload.update(data)
-        return await self._renderer.render_html(template, payload)
+        try:
+            return await asyncio.wait_for(
+                self._renderer.render_html(template, payload),
+                timeout=120 if template == "operator_list.html" else 30,
+            )
+        except TimeoutError:
+            logger.warning("Card rendering timed out: %s", template)
+            return None
 
     async def _render_detail_card(
         self, item: dict[str, Any], detail: dict[str, Any], note: str
@@ -1020,7 +1241,12 @@ class ArknightsPlugin(Star):
         except SklandError as exc:
             yield event.plain_result(await self._report_query_error(event, exc))
             return
-        note = build_note_context(data, secretary_mode=self._secretary_mode())
+        note = build_note_context(
+            data,
+            secretary_mode=self._secretary_mode(),
+            binding_uid=binding.get("uid"),
+            total_override=self._prts_total,
+        )
         image = await self._render("note.html", {"note": note})
         if image is None:
             yield event.plain_result(self._note_text(note))
@@ -1040,6 +1266,7 @@ class ArknightsPlugin(Star):
         return "\n".join(
             [
                 f"{note['nickname'] or '未知博士'} · 等级 {note['level']}",
+                f"UID：{note.get('uid') or '未知'}",
                 f"入职日期：{note['register_date']}",
                 f"主线进度：{note['main_stage']}",
                 f"干员 / 时装：{note['char_count']} / {note['skin_count']}",
@@ -1287,20 +1514,19 @@ class ArknightsPlugin(Star):
                 await asyncio.sleep(3 + random.random() * 3)
             groups = await self.store.list_sign_groups()
             heading = f"森空岛自动签到结果 · {day}\n"
-            if groups:
-                lines = [line for values in record["users"].values() for line in values]
-                destinations = [
-                    (str(group.get("umo") or ""), heading + "\n".join(lines))
-                    for group in groups
-                ]
-            else:
-                destinations = [
-                    (
-                        str(user.get("umo") or ""),
-                        heading + "\n".join(record["users"].get(key, [])),
-                    )
-                    for key, user in users.items()
-                ]
+            from .core.sign_groups import group_sign_destinations
+
+            group_checks = []
+            destinations = await group_sign_destinations(
+                self.context,
+                users,
+                record["users"],
+                groups,
+                heading,
+                diagnostics=group_checks,
+            )
+            record["group_checks"] = group_checks
+            self._write_sign_journal(journal)
             for umo, text in destinations:
                 if not umo or umo in record["delivered"]:
                     continue
@@ -1390,21 +1616,25 @@ class ArknightsPlugin(Star):
         groups = group_operators(
             data.get("chars") or [], char_info, data.get("equipmentInfoMap") or {}
         )
-        roster = build_roster_context(groups, char_info)
+        roster = build_roster_context(
+            groups, char_info, total_override=self._prts_total
+        )
         image = await self._render("operator_list.html", {"roster": roster})
         if image is None:
             summary = "、".join(
                 f"{group['profession_cn']} {len(group['operators'])}"
                 for group in groups
             )
-            yield event.plain_result(
-                f"已持有干员 {roster['owned']} / {roster['total']}。\n{summary}\n"
-                + "\n".join(
-                    f"{op['name']}：潜能 {op['potential_level'] or '未知'}；{op['mastery_text']}；{op['module_text']}"
-                    for group in groups
-                    for op in group["operators"]
+            names = list(
+                dict.fromkeys(
+                    op["name"] for group in groups for op in group["operators"]
                 )
+            )[:20]
+            fallback = (
+                f"已持有 {roster['owned']} / {roster['total']}\n{summary}\n"
+                + "、".join(names)
             )
+            yield event.plain_result(fallback[:499] + "…")
             return
         yield event.chain_result([Image.fromFileSystem(str(image))])
 

@@ -17,7 +17,7 @@ from .assets import (
     rarity_icon,
     secretary_portrait,
 )
-from .operators import training_summary
+from .operators import build_roster_context, group_operators, training_summary
 from .skland import SANITY_SECONDS_PER_POINT, derive_sanity
 
 UNKNOWN_TEXT = "未知"
@@ -150,12 +150,15 @@ def build_note_context(
     data: dict[str, Any],
     now: float | None = None,
     secretary_mode: str = "elite1",
+    binding_uid: str | None = None,
+    total_override: int | None = None,
 ) -> dict[str, Any]:
     """Build the account overview card context.
 
     Args:
         data: The ``data`` section of a player info response.
         now: Current unix timestamp; defaults to the system clock.
+        binding_uid: Bound game role UID, used when player status omits it.
         secretary_mode: Which assistant artwork to use; see
             :func:`core.assets.secretary_portrait`.
 
@@ -176,8 +179,12 @@ def build_note_context(
         for char_id, char in owned_chars.items()
         for module in training_summary(char, equipment_info)["unlocked_modules"]
     }
-    elite2_count = sum(
-        int(char.get("evolvePhase") or 0) == 2 for char in owned_chars.values()
+    elite2_count = len(
+        {
+            (char_info.get(char_id) or {}).get("name") or char_id
+            for char_id, char in owned_chars.items()
+            if int(char.get("evolvePhase") or 0) == 2
+        }
     )
     mastery3_skills = {
         (char_id, str(skill.get("id") or index))
@@ -219,13 +226,19 @@ def build_note_context(
 
     return {
         "nickname": status.get("name") or "",
+        "uid": str(status.get("uid") or binding_uid or "未知"),
         "level": int(status.get("level") or 0),
         "signature": str(status.get("resume") or "").strip(),
         "elite2_count": elite2_count,
         "mastery3_count": len(mastery3_skills),
         "module_count": len(unlocked_modules),
         "module_stage3_count": sum(level == 3 for level in unlocked_modules.values()),
-        "module_operator_count": len({char_id for char_id, _ in unlocked_modules}),
+        "module_operator_count": len(
+            {
+                (char_info.get(char_id) or {}).get("name") or char_id
+                for char_id, _ in unlocked_modules
+            }
+        ),
         "secretary": {
             **training_summary(owned_chars.get(secretary_id, {}), equipment_info),
             "char_id": secretary_id,
@@ -246,7 +259,17 @@ def build_note_context(
         "register_date": format_date(status.get("registerTs")),
         "main_stage": format_stage(status.get("mainStageProgress")),
         # charCnt/skinCnt are unreliable (observed as 0), so prefer the list sizes.
-        "char_count": int(status.get("charCnt") or 0) or len(chars),
+        "char_count": len(
+            {
+                (char_info.get(char_id) or {}).get("name") or char_id
+                for char_id in owned_chars
+            }
+        )
+        if chars
+        else int(status.get("charCnt") or 0),
+        "roster": build_roster_context(
+            group_operators(chars, char_info), char_info, total_override=total_override
+        ),
         "skin_count": int(status.get("skinCnt") or 0) or len(skins),
         "assist": assist,
         "sanity": build_sanity_context(data, now),
