@@ -1,4 +1,6 @@
-> **2026-11-02 定制版更新**：新增干员 DPS / 总伤查询与卡片、PRTS 干员总数和收集进度；优化干员列表、便签渲染及资源镜像，补充签到群通知与回归测试。
+> **2026-11-11 · 0.5.0 更新**：新增 ark卫戍战绩，展示卫戍协议最近三局记录；完善 DPS 多技能卡、DPS 与总伤双排名、肉鸽历史最高分与等级，以及基建详情。
+
+> **2026-11-02 定制版更新**：新增干员 DPS / 总伤查询与卡片、PRTS 干员总数和收集进度；`arkdps <干员>` 只报名字即可生成多技能卡，逐行展示各技能 DPS / 总伤 / 排名并高亮最高 DPS；优化干员列表、便签渲染及资源镜像，补充签到群通知与回归测试。
 
 > **2026-10-24 定制版更新**：保留已有专精、模组、潜能统计、助理立绘适配、签到补偿与查询优化；新增签到图片通知、随机羽毛笔彩蛋、`/arkmaa` 最新稳定版镜像下载和 `/ark海嗣` 随机动图，文字及图片帮助同步补充说明。彩蛋只在安全空白处随机出现，也可能不出现。
 
@@ -17,7 +19,7 @@
 ### *罗德岛终端 · 明日方舟 AstrBot 插件*
 
 [![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-FFB400?style=for-the-badge&logo=python)](https://github.com/AstrBotDevs/AstrBot)
-[![Version](https://img.shields.io/badge/version-0.4.6-FFB400?style=for-the-badge)](#-更新日志)
+[![Version](https://img.shields.io/badge/version-0.5.0-FFB400?style=for-the-badge)](#-更新日志)
 [![License](https://img.shields.io/badge/license-MIT-FFB400?style=for-the-badge)](LICENSE)
 
 ### 🚀 基于森空岛官方接口的明日方舟查询工具
@@ -175,7 +177,7 @@ astrbot_plugin_arknights/
 |:-----|:-----|:-----|
 | `ark基建` | 发电站 / 制造站 / 贸易站 / 宿舍 / 控制中枢 / 会客室，含干员心情、无人机与线索 | 全部 |
 | `ark剿灭` | 剿灭作战进度与本周合成玉 | 全部 |
-| `ark肉鸽` | 集成战略累计节点、通关次数、最高通关难度、分结局难度及收藏品和投资进度 | 全部 |
+| `ark肉鸽` | 集成战略历史最高分、当前等级、累计节点、通关次数、最高通关难度、分结局难度及收藏品和投资进度 | 全部 |
 | `ark任务` | 每日 / 每周任务与周常奖励 | 全部 |
 | `ark公招` | 公开招募栏位状态与倒计时 | 全部 |
 

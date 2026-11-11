@@ -14,7 +14,7 @@ from framework_stub import ensure_framework_logger
 
 ensure_framework_logger()
 import dps_tool  # noqa: E402
-from core.cards import build_note_context  # noqa: E402
+from core.cards import build_dps_rank_context, build_note_context  # noqa: E402
 
 
 def card_method():
@@ -30,6 +30,7 @@ def card_method():
         re=re,
         datetime=datetime,
         dps_tool=dps_tool,
+        build_dps_rank_context=build_dps_rank_context,
         logger=SimpleNamespace(warning=lambda *args: None),
     )
     exec(
@@ -68,11 +69,28 @@ class DPSCardTests(unittest.IsolatedAsyncioTestCase):
         self.render.assert_awaited_once()
 
     async def test_multiple_candidates_text_only(self):
-        image, text, _ = await self.method(self.harness, "能天使")
+        image, text, _ = await self.method(self.harness, "天使")
         self.assertIsNone(image)
         self.assertIn("多个候选", text)
-        self.assertEqual(len(text.splitlines()), 7)
+        self.assertEqual(len(text.splitlines()), 8)
         self.render.assert_not_awaited()
+
+    async def test_lower_bound_text_preserved(self):
+        self.rows[0]["总伤"] = "≥110751"
+        dps_tool.add_total_rank(self.rows)
+        for skill, template in [("3", "dps.html"), ("", "dps_multi.html")]:
+            with self.subTest(skill=skill):
+                self.render.reset_mock()
+                image, text, _ = await self.method(self.harness, "新约能天使", skill)
+                self.assertEqual(image, Path("card.jpg"))
+                self.assertIn("总伤 ≥110751", text)
+                self.assertEqual(self.rows[0]["总伤"], "≥110751")
+                self.render.assert_awaited_once()
+                self.assertEqual(self.render.call_args.args[0], template)
+        self.render.side_effect = TimeoutError()
+        image, text, _ = await self.method(self.harness, "新约能天使", "3")
+        self.assertIsNone(image)
+        self.assertIn("总伤 ≥110751", text)
 
     async def test_not_found_text_only(self):
         image, text, _ = await self.method(self.harness, "不存在的干员")

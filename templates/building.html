@@ -113,6 +113,16 @@
         border-color: var(--accent);
         color: var(--accent);
       }
+      .facility-stat {
+        font-size: 12px;
+        color: var(--label);
+        overflow-wrap: anywhere;
+      }
+      .training-value {
+        min-width: 0;
+        text-align: right;
+        overflow-wrap: anywhere;
+      }
     </style>
   </head>
   <body>
@@ -156,6 +166,12 @@
           {% if facility.icon %}<img src="{{ facility.icon }}" alt="" />{% endif
           %}{{ facility.name }}
         </div>
+        {% if facility.key == 'meeting' %}
+        <div class="row facility-stat">
+          <span class="row-label">线索交流剩余:</span>
+          <span class="row-value">{% if building.exchange.sharing %}{{ building.exchange.share_remaining_text or '未提供' }}{% else %}未在交流{% endif %}</span>
+        </div>
+        {% endif %}
         {% for slot in facility.slots %}
         <div class="slot">
           <div class="slot-level">Lv.{{ slot.level }}</div>
@@ -180,6 +196,45 @@
       </div>
       {% endfor %}
 
+      {% if building.recycle is not none %}
+      <div class="panel">
+        <div class="section-title">回收站</div>
+        <div class="row facility-stat">
+          <span class="row-label">等级</span>
+          <span class="row-value">{% if building.recycle.level is not none %}Lv.{{ building.recycle.level }}{% else %}未提供{% endif %}</span>
+        </div>
+        {% for slot in building.recycle.slots %}
+        <div class="slot">
+          <div class="slot-level">Lv.{{ slot.level }}</div>
+          <div class="slot-ops">
+            {% for op in slot.operators %}
+            <div class="op rarity-{{ op.stars }}">
+              <img src="{{ op.avatar }}" alt="{{ op.name }}" />
+              <div class="op-body">
+                <div class="op-name">{{ op.name }}</div>
+                <div class="op-mood {% if op.mood_percent < 35 %}low{% endif %}">
+                  <div style="width: {{ op.mood_percent }}%"></div>
+                </div>
+              </div>
+            </div>
+            {% endfor %}
+            {% if not slot.operators %}<div class="empty" style="padding: 4px 0">空闲</div>{% endif %}
+          </div>
+        </div>
+        {% endfor %}
+        {% if building.recycle.remain_text is not none %}
+        <div class="row facility-stat">
+          <span class="row-label">下次产出</span>
+          <span class="row-value">{{ building.recycle.remain_text }}</span>
+        </div>
+        {% endif %}
+        <div class="row facility-stat">
+          <span class="row-label">储藏空间</span>
+          <span class="row-value">{{ building.recycle.storage if building.recycle.storage is not none else '未提供' }}/{{ building.recycle.max if building.recycle.max is not none else '未提供' }}</span>
+        </div>
+      </div>
+      {% endif %}
+
       <div class="panel">
         <div class="section-title">其他</div>
         <div class="row">
@@ -199,12 +254,9 @@
         </div>
         <div class="row">
           <span class="row-label">训练室</span>
-          <span class="row-value">
-            {% if building.training.trainee %}
-            {{ building.training.trainee }} ← {{ building.training.trainer }}
-            {% else %}
-            空闲
-            {% endif %}
+          <span class="row-value training-value">
+            训练位: {{ building.training.trainee or '空闲' }} / 教官: {{ building.training.trainer or '空闲' }}
+            <div class="facility-stat">剩余训练时间: {% if building.training.active %}{{ building.training.remain_text }}{% else %}无训练中{% endif %}</div>
           </span>
         </div>
       </div>

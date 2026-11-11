@@ -9,8 +9,9 @@
 <div class="card-header"><div><div class="section-title">DPS 查询 · 罗德岛终端</div><h1>{{ title }}</h1></div></div>
 <div class="stripes"></div>
 <div class="metrics">{% for key in ['DPS','总伤','质量'] %}<div class="metric"><span class="row-label">{{ key }}</span><b>{{ dps[key] }}</b></div>{% endfor %}</div>
-<div class="panel details"><div class="row"><span class="row-label">排名</span><span class="row-value">{{ dps['DPS排名'] }} / {{ total }}</span></div>
+<div class="panel details"><div class="row"><span class="row-label">DPS 排名</span><span class="row-value">{% if dps_rank %}{{ dps_rank }} / {{ dps_rank_total }}{% else %}—{% endif %}</span></div>
+<div class="row"><span class="row-label">总伤排名</span><span class="row-value">{% if dps['总伤'] != '不适用' and dmg_rank %}{{ dmg_rank }} / {{ dmg_rank_total }}{% else %}—{% endif %}</span></div>
 {% for key in ['持续','初动','回转','部署费用','DPH','攻击间隔','目标数','职业','上线时间'] %}<div class="row"><span class="row-label">{{ key }}</span><span class="row-value">{{ dps[key] }}</span></div>{% endfor %}</div>
 {% if stale %}<div class="empty">缓存数据已过期，请留意数据时间</div>{% endif %}
-<div class="card-footer">标准计算条件 · ark-dps.com · 数据 {{ updated }}</div>
+<div class="card-footer"><div>标准计算条件 · ark-dps.com · 数据 {{ updated }}<br>总伤排名：≥ 取下限参与，不适用不参与（全表 {{ total }} 条）</div></div>
 </div></body></html>

@@ -35,7 +35,11 @@ from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 from . import dps_tool
 from .core.announce import AnnounceClient, AnnounceError
-from .core.cards import build_note_context, build_sanity_context
+from .core.cards import (
+    build_dps_rank_context,
+    build_note_context,
+    build_sanity_context,
+)
 from .core.daily import (
     build_building_context,
     build_campaign_context,
@@ -47,6 +51,7 @@ from .core.feed import DEFAULT_BASE_URL, FeedClient, FeedError, _body_html
 from .core.gacha import GachaClient, GachaError, analyze, format_record_time
 from .core.gacha_store import GachaStore
 from .core.gamedata import GameData
+from .core.garrison import GarrisonClient, GarrisonError, build_context
 from .core.hypergryph import HypergryphClient, HypergryphError
 from .core.maa_mirror import MIRROR_PAGE, MAAMirror
 from .core.operators import (
@@ -62,7 +67,7 @@ from .core.skland import SignInResult, SklandClient, SklandError, UserBinding
 from .core.store import Store
 
 PLUGIN_NAME = "astrbot_plugin_arknights"
-PLUGIN_VERSION = "0.4.6"
+PLUGIN_VERSION = "0.5.0"
 
 # How often the health watchdog probes the self-hosted service, and how many
 # consecutive bad observations it takes to raise an alert. The service writes
@@ -121,15 +126,16 @@ ark干员列表          已持有干员图鉴
 ark干员 <干员名>      单个干员详情
 
 【DPS 查询】
-arkdps <干员>        DPS / 总伤 / 榜单排名（出图）
+arkdps <干员>        列出该干员各技能 DPS / 总伤 / 排名（出图）；简称优先匹配同名干员，如 arkdps 能天使
 arkdps <干员> <技能> 指定技能序号或技能名片段，如 arkdps 能天使 3
 
 【日常玩法】
-ark基建              基建设施与干员心情
+ark基建              基建设施与干员心情（含训练/线索交流/回收站）
 ark剿灭              剿灭作战与本周合成玉
 ark肉鸽              集成战略收藏品与投资
 ark任务              每日/每周任务与周常奖励
 ark公招              公开招募栏位状态
+ark卫戍战绩          卫戍协议最近 3 局战绩
 
 【官方公告】
 ark公告              公告列表（`ark公告 <编号>` 看正文）
@@ -183,7 +189,10 @@ HELP_SECTIONS = [
     {
         "title": "DPS 查询",
         "items": [
-            {"cmd": "arkdps <干员>", "desc": "DPS / 总伤 / 榜单排名（出图）"},
+            {
+                "cmd": "arkdps <干员>",
+                "desc": "列出该干员各技能 DPS / 总伤 / 排名（出图）；简称优先匹配同名干员，如 arkdps 能天使",
+            },
             {
                 "cmd": "arkdps <干员> <技能>",
                 "desc": "指定技能序号或技能名片段，如 arkdps 能天使 3",
@@ -193,11 +202,12 @@ HELP_SECTIONS = [
     {
         "title": "日常玩法",
         "items": [
-            {"cmd": "ark基建", "desc": "基建设施与干员心情"},
+            {"cmd": "ark基建", "desc": "基建设施与干员心情（含训练/线索交流/回收站）"},
             {"cmd": "ark剿灭", "desc": "剿灭作战与本周合成玉"},
             {"cmd": "ark肉鸽", "desc": "集成战略收藏品与投资"},
             {"cmd": "ark任务", "desc": "每日/每周任务与周常奖励"},
             {"cmd": "ark公招", "desc": "公开招募栏位状态"},
+            {"cmd": "ark卫戍战绩", "desc": "卫戍协议最近 3 局战绩"},
         ],
     },
     {
@@ -225,6 +235,37 @@ HELP_SECTIONS = [
         ],
     },
 ]
+
+
+def _rogue_history(result):
+    """Extract valid nonnegative integers from rogue history.
+
+    Args:
+        result: Rogue theme response from Skland.
+
+    Returns:
+        History score, level and maximum recorded difficulty, or None if absent.
+    """
+    history = result.get("history") or {}
+
+    def _int(value):
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+        return None
+
+    return {
+        "score": _int(history.get("score")),
+        "bpLevel": _int(history.get("bpLevel")),
+        "maxModeGrade": max(
+            (
+                grade
+                for record in history.get("records") or []
+                if isinstance(record, dict)
+                and (grade := _int(record.get("modeGrade"))) is not None
+            ),
+            default=None,
+        ),
+    }
 
 
 @register(PLUGIN_NAME, "Coe", "罗德岛终端", PLUGIN_VERSION)
@@ -513,24 +554,69 @@ class ArknightsPlugin(Star):
             干员(string): 干员名，可用简称。
             技能(string): 可选，技能序号(1/2/3)或技能名片段。
         """
-        image, text, title = await self._dps_card(干员, 技能)
-        if image is None:
-            return text
-        try:
-            await event.send(event.chain_result([Image.fromFileSystem(str(image))]))
-        except Exception as exc:
-            logger.warning("[ark-dps] Image delivery failed: %s", exc)
-            return text
-        return f"已把 DPS 卡发出去（{title}）"
+        return await self._send_dps_card(event, 干员, 技能)
 
     @filter.command("arkdps")
     async def show_dps(self, event: AstrMessageEvent, 干员: str = "", 技能: str = ""):
         """Show a DPS card or a text candidate list."""
-        image, text, _ = await self._dps_card(干员, 技能)
-        if image is None:
-            yield event.plain_result(text)
-        else:
-            yield event.chain_result([Image.fromFileSystem(str(image))])
+        await self._send_dps_card(event, 干员, 技能)
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=99999)
+    async def dps_message_entry(self, event: AstrMessageEvent):
+        """Handle compact DPS commands in private or explicitly awakened chats.
+
+        Args:
+            event: Incoming message event.
+        """
+        # is_wake is also set by generic handler matches, so it is not sufficient.
+        if not event.is_private_chat() and not (
+            event.get_group_id() and event.is_at_or_wake_command
+        ):
+            return
+        match = re.fullmatch(r"\s*/?\s*arkdps\s*(.+)", event.message_str or "")
+        if match is None or not match[1].strip():
+            return
+        args = match[1].strip()
+        parts = args.rsplit(maxsplit=1)
+        operator, skill = (parts[0], parts[1]) if len(parts) == 2 else (args, "")
+        if not skill:
+            numbered = re.fullmatch(r"(.+?)([123])", operator)
+            if numbered:
+                operator, skill = numbered.groups()
+        await self._send_dps_card(event, operator, skill)
+
+    async def _send_dps_card(
+        self, event: AstrMessageEvent, operator: str, skill: str = ""
+    ):
+        """Send a DPS result and stop further replies after delivery.
+
+        Args:
+            event: Destination message event.
+            operator: Operator name or fragment.
+            skill: Optional skill number or name fragment.
+
+        Returns:
+            Delivery confirmation or the fallback text.
+        """
+        logger.info("[arkdps] 命中 %s %s", operator, skill)
+        image, text, title = await self._dps_card(operator, skill)
+        if image is not None:
+            try:
+                logger.info(
+                    "[arkdps] 发送图片 %s %d", image, Path(image).stat().st_size
+                )
+                await event.send(event.chain_result([Image.fromFileSystem(str(image))]))
+            except Exception as exc:
+                logger.warning("[arkdps] 图片发送失败: %s", exc)
+            else:
+                event.stop_event()
+                logger.info("[arkdps] 图片发送完成 %s", image)
+                return f"已把 DPS 卡发出去（{title}）"
+        logger.info("[arkdps] 发送文字 %s", text[:40])
+        await event.send(event.plain_result(text))
+        event.stop_event()
+        logger.info("[arkdps] 文字发送完成 %s", text[:40])
+        return text
 
     async def _dps_card(self, operator: str, skill: str = ""):
         """Resolve a query and render its unique result.
@@ -549,6 +635,53 @@ class ArknightsPlugin(Star):
             rows = data["rows"]
             result = dps_tool.query(rows, operator, skill)
             stale = "（站点刷新失败，以下使用过期缓存）\n" if data["stale"] else ""
+            groups = (
+                dps_tool.group_by_operator(rows, operator) if not skill.strip() else []
+            )
+            if len(groups) == 1:
+                title, skills = groups[0]
+                updated = datetime.fromtimestamp(data["fetched_at"]).strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+                card_rows = [
+                    dict(
+                        row,
+                        label=dps_tool.skill_label(row),
+                        **build_dps_rank_context(row, rows),
+                    )
+                    for row in skills
+                ]
+                highest = max(
+                    card_rows, key=lambda row: float(row["DPS"].replace(",", ""))
+                )
+                highest["highest"] = True
+                text = (
+                    stale
+                    + title
+                    + "\n"
+                    + "\n".join(
+                        f"{row['label']}：DPS {row['DPS']} / 总伤 {row['总伤']} / 排名 {row['DPS排名']}"
+                        for row in card_rows
+                    )
+                )
+                try:
+                    image = await asyncio.wait_for(
+                        self._render(
+                            "dps_multi.html",
+                            {
+                                "operator": title,
+                                "rows": card_rows,
+                                "total": len(rows),
+                                "updated": updated,
+                                "stale": data["stale"],
+                            },
+                        ),
+                        timeout=45,
+                    )
+                except Exception as exc:
+                    logger.warning("[ark-dps] Card rendering failed: %s", exc)
+                    image = None
+                return image, text, title
             if not result["candidates"]:
                 return (
                     None,
@@ -559,11 +692,12 @@ class ArknightsPlugin(Star):
             if result["matched"] is None:
                 text = (
                     stale
-                    + "找到多个候选，请指定完整干员名和技能：\n"
+                    + "找到多个候选，请指定完整干员名或技能：\n"
                     + "\n".join(
-                        f"{r['干员']}：DPS {r['DPS']} / 排名 {r['DPS排名']} / {len(rows)}"
+                        f"{r['干员']} · {dps_tool.skill_label(r)}：DPS {r['DPS']} / DPS排名 {r['DPS排名']} / {len(rows)} / 总伤排名 {r['总伤排名'] or '—'}"
                         for r in result["candidates"][:6]
                     )
+                    + "\n直接发完整名字就能出图，比如 arkdps 新约能天使"
                 )
                 return None, text, ""
             row = result["matched"]
@@ -584,6 +718,7 @@ class ArknightsPlugin(Star):
                         "dps.html",
                         {
                             "dps": row,
+                            **build_dps_rank_context(row, rows),
                             "title": title,
                             "total": len(rows),
                             "updated": updated,
@@ -1203,6 +1338,9 @@ class ArknightsPlugin(Star):
                         )
                         if isinstance(result, dict)
                         else {},
+                        "history": _rogue_history(result)
+                        if isinstance(result, dict)
+                        else {},
                     }
             data["rogueCareerMap"] = careers
         self._player_cache[uid] = (now + ttl, data)
@@ -1762,28 +1900,53 @@ class ArknightsPlugin(Star):
         context = build_building_context(data)
         image = await self._render("building.html", {"building": context})
         if image is None:
-            yield event.plain_result(
-                self._lines(
-                    [
-                        (
-                            "无人机",
-                            f"{context['labor']['value']} / {context['labor']['max']}",
-                        ),
-                        (
-                            "线索",
-                            f"持有 {context['clue']['own']}，已收 {context['clue']['received']}",
-                        ),
-                        ("线索板", "、".join(context["clue"]["board"]) or "无"),
-                        (
-                            "设施",
-                            "、".join(
-                                f"{item['name']}{len(item['slots'])}"
-                                for item in context["facilities"]
-                            ),
-                        ),
-                    ]
+            rows = [
+                ("无人机", f"{context['labor']['value']} / {context['labor']['max']}"),
+                (
+                    "线索",
+                    f"持有 {context['clue']['own']}，已收 {context['clue']['received']}",
+                ),
+                ("线索板", "、".join(context["clue"]["board"]) or "无"),
+                (
+                    "设施",
+                    "、".join(
+                        f"{item['name']}{len(item['slots'])}"
+                        for item in context["facilities"]
+                    ),
+                ),
+                (
+                    "训练室",
+                    f"训练位: {context['training']['trainee'] or '空闲'} / "
+                    f"教官: {context['training']['trainer'] or '空闲'}",
+                ),
+                (
+                    "剩余训练时间",
+                    context["training"]["remain_text"]
+                    if context["training"]["active"]
+                    else "无训练中",
+                ),
+                (
+                    "线索交流剩余",
+                    (context["exchange"]["share_remaining_text"] or "未提供")
+                    if context["exchange"]["sharing"]
+                    else "未在交流",
+                ),
+            ]
+            recycle = context["recycle"]
+            if recycle is not None:
+                level = recycle["level"] if recycle["level"] is not None else "未提供"
+                storage = (
+                    recycle["storage"] if recycle["storage"] is not None else "未提供"
                 )
-            )
+                maximum = recycle["max"] if recycle["max"] is not None else "未提供"
+                operators = "、".join(
+                    op["name"] for slot in recycle["slots"] for op in slot["operators"]
+                )
+                detail = f"等级 {level} · 干员 {operators or '空闲'}"
+                if recycle["remain_text"] is not None:
+                    detail += f" · 下次产出 {recycle['remain_text']}"
+                rows.append(("回收站", f"{detail} · 储藏空间 {storage}/{maximum}"))
+            yield event.plain_result(self._lines(rows))
             return
         yield event.chain_result([Image.fromFileSystem(str(image))])
 
@@ -1832,7 +1995,7 @@ class ArknightsPlugin(Star):
                             theme["name"]
                             + " · 最高通关 "
                             + (theme["highest_difficulty"] or "未提供"),
-                            f"累计节点 {theme['nodes'] if theme['nodes'] is not None else '未提供'} · 通关次数 {theme['clears'] if theme['clears'] is not None else '未提供'} · 收藏品 {theme['relics']} · 投资 {theme['bank']}",
+                            f"最高分 {theme['highest_score'] if theme['highest_score'] is not None else '未提供'} · 等级 {theme['level'] if theme['level'] is not None else '未提供'} · 累计节点 {theme['nodes'] if theme['nodes'] is not None else '未提供'} · 通关次数 {theme['clears'] if theme['clears'] is not None else '未提供'} · 收藏品 {theme['relics']} · 投资 {theme['bank']}",
                         )
                         for theme in context["themes"]
                     ]
@@ -1905,6 +2068,73 @@ class ArknightsPlugin(Star):
             )
             return
         yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @filter.command("ark卫戍战绩")
+    async def show_garrison(self, event: AstrMessageEvent):
+        """Show the most recent garrison (卫戍协议) records as a card."""
+        resolved = await self._resolve_binding(event)
+        if not resolved:
+            yield event.plain_result(NO_BINDING_TEXT)
+            return
+        user, binding = resolved
+        try:
+            authorization = await self.skland.get_authorization(
+                str(user.get("token") or "")
+            )
+            cred = await self.skland.get_credential(authorization)
+            data = await self._player_data(user, binding)
+            resource, records = await GarrisonClient(self.skland).fetch(
+                cred, str(binding.get("uid") or "")
+            )
+        except (SklandError, GarrisonError) as exc:
+            yield event.plain_result(await self._report_query_error(event, exc))
+            return
+        # The assistant operator name often needs the plugin's own table (Amiya
+        # is absent from the guide resource), so make sure it is loaded.
+        await self._gamedata.ensure()
+        context = build_context(resource, records, data, self._gamedata.char_names)
+        if not context["records"]:
+            yield event.plain_result("没有查询到卫戍协议战绩。")
+            return
+        image = await self._render("garrison_recent.html", {"garrison": context})
+        if image is None:
+            yield event.plain_result(self._garrison_text(context))
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @staticmethod
+    def _garrison_text(context: dict[str, Any]) -> str:
+        """Build the plain text fallback for the garrison card.
+
+        Args:
+            context: Context produced by ``build_context``.
+
+        Returns:
+            Multi-line summary text.
+        """
+        user = context["user"]
+        lines = [
+            f"卫戍协议战绩（最近 {len(context['records'])} 局）",
+            (
+                f"uid {user['uid']} · Lv{user['level']} · {context['season_name']} · "
+                f"{context['version']} · {context['phase_name']}"
+                + (
+                    f" · 助理 {user['secretary_name']}"
+                    if user["secretary_name"]
+                    else ""
+                )
+            ),
+        ]
+        for index, item in enumerate(context["records"], 1):
+            lines.append(
+                f"{index}. {item['title']} · 通关 {item['pass_round']} · "
+                f"{item['mode']} · {item['strategy_name']} · {item['difficulty']}"
+            )
+            lines.append(
+                f"   奖杯 {item['trophy_before']}→{item['trophy_after']} · "
+                f"击杀 {item['kill_cnt']} · 金币 {item['coin_cost']}"
+            )
+        return "\n".join(lines)
 
     # ── headhunting ───────────────────────────────────────────────────────
 

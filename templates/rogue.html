@@ -42,8 +42,9 @@
         padding: 11px 14px;
         border-right: 1px solid var(--line-soft);
       }
-      .theme-stat:nth-child(-n+2) { grid-column: span 3; border-bottom: 1px solid var(--line-soft); }
-      .theme-stat:last-child {
+      .theme-stat-wide { grid-column: span 3; }
+      .theme-stat-summary { border-bottom: 1px solid var(--line-soft); }
+      .theme-stat-row-end {
         border-right: none;
       }
       .theme-key {
@@ -76,25 +77,27 @@
           <span class="theme-name">{{ theme.name }}</span>
         </div>
         <div class="theme-body">
+          <div class="theme-stat theme-stat-wide theme-stat-summary"><div class="theme-key">历史最高分</div><div class="theme-val accent">{{ theme.highest_score if theme.highest_score is not none else "未提供" }}</div></div>
+          <div class="theme-stat theme-stat-wide theme-stat-summary theme-stat-row-end"><div class="theme-key">当前等级</div><div class="theme-val accent">{{ theme.level if theme.level is not none else "未提供" }}</div></div>
           <div class="theme-stat"><div class="theme-key">累计节点</div><div class="theme-val accent">{{ theme.nodes if theme.nodes is not none else "未提供" }}</div></div>
           <div class="theme-stat"><div class="theme-key">通关次数</div><div class="theme-val">{{ theme.clears if theme.clears is not none else "未提供" }}</div></div>
-          <div class="theme-stat">
+          <div class="theme-stat theme-stat-row-end">
             <div class="theme-key">收藏品</div>
             <div class="theme-val accent">{{ theme.relics }}</div>
           </div>
-          <div class="theme-stat">
+          <div class="theme-stat theme-stat-wide">
             <div class="theme-key">投资系统</div>
             <div class="theme-val">{{ theme.bank }}</div>
           </div>
-          <div class="theme-stat">
-            <div class="theme-key">历史最高</div>
+          <div class="theme-stat theme-stat-wide theme-stat-row-end">
+            <div class="theme-key">投资历史最高</div>
             <div class="theme-val">{{ theme.bank_record }}</div>
           </div>
         </div>
         <div class="difficulty-details">
-          <strong>最高通关难度：{{ theme.highest_difficulty or "未提供" }}</strong>
+          <strong>最高通关难度：{{ theme.highest_difficulty or "未提供" }}{% if theme.highest_difficulty and theme.highest_from_history %}（历史对局最高）{% endif %}</strong>
           {% if theme.ending_difficulties %}<div>{{ theme.ending_difficulties | join("　·　") }}</div>{% endif %}
-          {% if not theme.ending_details_complete %}<div class="difficulty-note">接口未提供各结局完整的最高难度记录</div>{% endif %}
+          {% if theme.highest_from_history %}<div class="difficulty-note">接口没有该主题的通关难度记录，这里取历史对局最高难度</div>{% elif not theme.ending_details_complete %}<div class="difficulty-note">接口未提供各结局完整的最高难度记录</div>{% endif %}
         </div>
       </div>
       {% endfor %}
@@ -103,7 +106,7 @@
       {% endif %}
 
       <div class="card-footer">
-        <span>© HYPERGRYPH · 累计节点来自主题生涯统计 · 通关次数来自森空岛快照 · 未提供不代表零</span>
+        <span>© HYPERGRYPH · 累计节点来自主题生涯统计 · 通关次数来自森空岛快照 · 未提供不代表零 · 分数与等级来自森空岛主题生涯接口，未提供不代表零</span>
         <span><span class="barcode"></span><span class="serial">RI-ROGUE-001</span></span>
       </div>
     </div>

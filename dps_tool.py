@@ -1,7 +1,8 @@
-"""Rendered ark-dps ranking, queries and a twelve-hour disk cache."""
+"""Rendered ark-dps ranking, queries and a thirty-minute disk cache."""
 
 import asyncio
 import json
+import math
 import re
 import time
 from pathlib import Path
@@ -10,8 +11,40 @@ from astrbot.api import logger
 from bs4 import BeautifulSoup
 
 COLUMNS = "干员 DPS 总伤 质量 持续 初动 回转 部署费用 模组 DPH 攻击间隔 目标数 目标选取 用法 计算条件 计算方式 职业 上线时间 DPS排名".split()
-TTL = 12 * 3600
+TTL = 30 * 60
 _refresh_lock = asyncio.Lock()
+
+
+def add_total_rank(rows):
+    """Add descending competition ranks in place.
+
+    Args:
+        rows: All ranking rows; ≥ totals use their lower bounds and nonnumeric
+            totals are excluded. Original total strings are preserved.
+    """
+    ranked = []
+    for row in rows:
+        row["总伤排名"] = ""
+        row["总伤可排名"] = False
+        row["总伤下限"] = False
+        total = str(row.get("总伤", "")).replace(",", "").strip()
+        lower_bound = total.startswith("≥")
+        try:
+            value = float(total[1:] if lower_bound else total)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            row["总伤下限"] = lower_bound
+            ranked.append((value, row))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    previous = None
+    rank = 0
+    for position, (value, row) in enumerate(ranked, 1):
+        if value != previous:
+            rank = position
+        row["总伤排名"] = rank
+        row["总伤可排名"] = True
+        previous = value
 
 
 def parse_rank_html(html: str) -> list[dict]:
@@ -50,6 +83,7 @@ def parse_rank_html(html: str) -> list[dict]:
         )
     if len(rows) < 50:
         raise ValueError("排行榜数据不足 50 行")
+    add_total_rank(rows)
     return rows
 
 
@@ -85,6 +119,26 @@ async def fetch_rank_table() -> list[dict]:
     return await asyncio.wait_for(scrape(), timeout=60)
 
 
+def exact_operator_rows(rows, operator: str) -> list[dict]:
+    """Find rows belonging to an exact operator name.
+
+    Args:
+        rows: Parsed ranking rows.
+        operator: Operator name, ignoring whitespace.
+
+    Returns:
+        Exact operator rows before skill filtering.
+    """
+    operator = re.sub(r"\s+", "", operator)
+    exact = []
+    for row in rows:
+        name = re.sub(r"\s+", "", row["干员"])
+        parts = re.fullmatch(r"(.*?)([123])(.*)", name)
+        if operator and (parts.group(1) if parts else name) == operator:
+            exact.append(row)
+    return exact
+
+
 def query(rows, operator: str, skill: str | None = None) -> dict:
     """Find every matching operator and optional skill without guessing.
 
@@ -98,6 +152,11 @@ def query(rows, operator: str, skill: str | None = None) -> dict:
     """
     operator = re.sub(r"\s+", "", operator)
     skill = re.sub(r"\s+", "", skill or "")
+    if not skill:
+        parts = re.fullmatch(r"(.*?)([123])", operator)
+        if parts:
+            operator, skill = parts.groups()
+    rows = exact_operator_rows(rows, operator) or rows
     candidates = []
     for row in rows:
         name = re.sub(r"\s+", "", row["干员"])
@@ -116,6 +175,33 @@ def query(rows, operator: str, skill: str | None = None) -> dict:
         "candidates": candidates,
         "matched": candidates[0] if len(candidates) == 1 else None,
     }
+
+
+def group_by_operator(rows, operator: str) -> list[tuple[str, list[dict]]]:
+    """Group matching operators, sorting skills and groups by skill number."""
+    operator = re.sub(r"\s+", "", operator)
+    groups = {}
+    for row in query(rows, operator)["candidates"]:
+        name = re.sub(r"\s+", "", row["干员"])
+        parts = re.fullmatch(r"(.*?)([123])(.*)", name)
+        operator_name, number, _ = parts.groups() if parts else (name, "", "")
+        groups.setdefault(operator_name, []).append((int(number) if number else 4, row))
+    ordered = []
+    for name, skills in groups.items():
+        skills.sort(key=lambda item: item[0])
+        ordered.append((name, skills))
+    ordered.sort(key=lambda item: item[1][0][0])
+    return [(name, [row for _, row in skills]) for name, skills in ordered]
+
+
+def skill_label(row) -> str:
+    """Return a compact skill label, retaining unnumbered names."""
+    name = re.sub(r"\s+", "", row["干员"])
+    parts = re.fullmatch(r"(.*?)([123])(.*)", name)
+    if parts:
+        _, number, skill_name = parts.groups()
+        return f"{number}技能「{skill_name}」"
+    return row["干员"]
 
 
 async def load_rows(force_refresh=False):
@@ -150,6 +236,7 @@ async def load_rows(force_refresh=False):
                     for row in data["rows"]
                 )
             ):
+                add_total_rank(data["rows"])
                 cached = data
         except (OSError, ValueError):
             pass

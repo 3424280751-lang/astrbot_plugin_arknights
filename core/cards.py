@@ -23,6 +23,29 @@ from .skland import SANITY_SECONDS_PER_POINT, derive_sanity
 UNKNOWN_TEXT = "未知"
 
 
+def build_dps_rank_context(row, rows) -> dict:
+    """Build the rank fields shared by single and multi skill cards.
+
+    Args:
+        row: One ranking row.
+        rows: All rows from the ranking table.
+
+    Returns:
+        Rank values and population sizes, excluding unrankable damage totals,
+        with empty strings for missing ranks.
+    """
+    dps_rank = row.get("DPS排名") or ""
+    dmg_rank = row.get("总伤排名", "") if row.get("总伤可排名") else ""
+    return {
+        "dps_rank": dps_rank,
+        "dps_rank_total": len(rows) if dps_rank and rows else "",
+        "dmg_rank": dmg_rank,
+        "dmg_rank_total": sum(bool(item.get("总伤可排名")) for item in rows)
+        if dmg_rank and rows
+        else "",
+    }
+
+
 def format_timestamp(value: Any) -> str:
     """Format a unix timestamp as a local ``YYYY-MM-DD HH:MM`` string.
 

@@ -9,6 +9,7 @@ This module never imports ``astrbot``.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .assets import char_avatar, facility_icon
@@ -32,6 +33,47 @@ CLUE_CN: dict[str, str] = {
 # Recruit slot states observed from the API. ``state`` is only a hint; the
 # timestamps are authoritative, so an unknown state still renders sensibly.
 RECRUIT_IDLE = 1
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    """Normalize an optional nonnegative API counter.
+
+    Args:
+        value: Raw numeric counter.
+
+    Returns:
+        Integer counter, or None for missing, negative or invalid values.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value) if float(value) >= 0 else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def format_duration(seconds: Any) -> str | None:
+    """Format a duration using Chinese time units.
+
+    Args:
+        seconds: Nonnegative duration in seconds.
+
+    Returns:
+        Human readable duration, or None for missing or invalid values.
+    """
+    seconds = _nonnegative_int(seconds)
+    if seconds is None:
+        return None
+    if seconds < 60:
+        return f"{seconds}秒"
+    if seconds < 3600:
+        minutes, remainder = divmod(seconds, 60)
+        return f"{minutes}分" + (f"{remainder}秒" if remainder else "")
+    if seconds < 86400:
+        hours, remainder = divmod(seconds, 3600)
+        return f"{hours}小时{remainder // 60}分"
+    days, remainder = divmod(seconds, 86400)
+    return f"{days}天{remainder // 3600}小时"
 
 
 def mood_value(ap: Any) -> float:
@@ -149,6 +191,47 @@ def build_building_context(data: dict[str, Any]) -> dict[str, Any]:
     training = building.get("training") or {}
     trainee = training.get("trainee") or {}
     trainer = training.get("trainer") or {}
+    remain_secs = _nonnegative_int(training.get("remainSecs"))
+    share_complete = _nonnegative_int(clue.get("shareCompleteTime"))
+    share_remaining = (
+        max(0, share_complete - int(time.time()))
+        if share_complete is not None
+        else None
+    )
+
+    recycle_source = (
+        building.get("recycle")
+        or building.get("recycles")
+        or building.get("recycleBin")
+    )
+    recycle = None
+    if isinstance(recycle_source, list) and recycle_source:
+        recycle_source = {"slots": recycle_source}
+    if isinstance(recycle_source, dict) and recycle_source:
+        recycle_rooms = (
+            recycle_source.get("slots") or recycle_source.get("room") or recycle_source
+        )
+        if isinstance(recycle_rooms, dict):
+            recycle_rooms = [recycle_rooms]
+        recycle_slots = _slots_of(
+            [
+                {**room, "level": _nonnegative_int(room.get("level"))}
+                for room in (recycle_rooms if isinstance(recycle_rooms, list) else [])
+                if isinstance(room, dict)
+            ],
+            char_info,
+        )
+        recycle_remaining = _nonnegative_int(
+            recycle_source.get("remainSecs", recycle_source.get("remain_secs"))
+        )
+        recycle = {
+            "level": _nonnegative_int(recycle_source.get("level")),
+            "slots": recycle_slots,
+            "remain_secs": recycle_remaining,
+            "remain_text": format_duration(recycle_remaining),
+            "storage": _nonnegative_int(recycle_source.get("storage")),
+            "max": _nonnegative_int(recycle_source.get("max")),
+        }
 
     return {
         "facilities": facilities,
@@ -170,6 +253,9 @@ def build_building_context(data: dict[str, Any]) -> dict[str, Any]:
         },
         "training": {
             "level": int(training.get("level") or 0),
+            "remain_secs": remain_secs,
+            "remain_text": format_duration(remain_secs),
+            "active": remain_secs is not None and remain_secs > 0,
             "trainee": _operator_ref(str(trainee.get("charId") or ""), char_info)[
                 "name"
             ]
@@ -181,6 +267,12 @@ def build_building_context(data: dict[str, Any]) -> dict[str, Any]:
             if trainer
             else "",
         },
+        "exchange": {
+            "share_remaining_secs": share_remaining,
+            "share_remaining_text": format_duration(share_remaining),
+            "sharing": bool(clue.get("sharing")),
+        },
+        "recycle": recycle,
         "mood_max": MOOD_MAX,
     }
 
@@ -242,11 +334,20 @@ def build_rogue_context(data: dict[str, Any]) -> dict[str, Any]:
         meta = info_map.get(rogue_id) or {}
         bank = record.get("bank") or {}
         career = data.get("rogueCareerMap", {}).get(rogue_id) or {}
+        history = {}
+        for key in ("score", "bpLevel", "maxModeGrade"):
+            value = (career.get("history") or {}).get(key)
+            history[key] = (
+                value
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                else None
+            )
         clear_info = career.get("clearInfo") or {}
         grade = clear_info.get("grade")
         difficulty = str(clear_info.get("difficulty") or "")
         endings = clear_info.get("endings") or []
         highest = None
+        highest_from_history = False
         if (
             isinstance(grade, int)
             and not isinstance(grade, bool)
@@ -254,6 +355,17 @@ def build_rogue_context(data: dict[str, Any]) -> dict[str, Any]:
             and (difficulty or endings)
         ):
             highest = f"{difficulty} {grade}".strip()
+        if highest is None and history.get("maxModeGrade") is not None:
+            difficulty_name = {
+                "rogue_1": "难度",
+                "rogue_2": "波涛迭起",
+                "rogue_3": "挑战自然",
+                "rogue_4": "直面魂灵",
+                "rogue_5": "请君入园",
+                "rogue_6": "保密等级",
+            }.get(rogue_id, "难度")
+            highest = f"{difficulty_name} {history['maxModeGrade']}"
+            highest_from_history = True
         ending_grades = clear_info.get("endingGrade") or {}
         ending_details = []
         for ending_id, ending_grade in ending_grades.items():
@@ -271,7 +383,10 @@ def build_rogue_context(data: dict[str, Any]) -> dict[str, Any]:
         themes.append(
             {
                 "id": rogue_id,
+                "highest_score": history.get("score"),
+                "level": history.get("bpLevel"),
                 "highest_difficulty": highest,
+                "highest_from_history": highest_from_history,
                 "ending_difficulties": ending_details,
                 "ending_details_complete": bool(ending_grades),
                 "nodes": (data.get("rogueCareerMap", {}).get(rogue_id) or {}).get(

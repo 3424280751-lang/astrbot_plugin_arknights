@@ -1,0 +1,32 @@
+﻿<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><style>
+{{ base_css | safe }}
+.skill-row { display:grid; grid-template-columns:minmax(180px,1fr) 110px 140px 120px 120px; gap:16px; padding:12px 0 18px; align-items:start; }
+.skill-name { min-width:0; font-size:19px; line-height:1.6; }
+.skill-name b { display:block; margin-top:8px; }
+.metric { min-width:0; text-align:right; }
+.skill-row .row-label { display:block; font-size:12px; color:var(--label); }
+.metric b { display:block; font-size:26px; margin-top:8px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.metric b.not-applicable { font-size:16px; line-height:31px; }
+.highest { border-color:var(--theme); background:var(--theme-soft); }
+.highest .skill-name, .highest .metric b { color:var(--theme); }
+.highest-tag { display:inline-block; font-size:12px; padding:1px 7px; margin-left:8px; border:1px solid var(--theme); border-radius:4px; }
+.skill-details { color:var(--label); font-size:12px; padding-top:12px; line-height:1.7; }
+h1 { font-size:34px; margin-bottom:8px; }
+</style></head><body><div class="card {{ card_class }}">
+<div class="card-header"><div><div class="section-title">DPS 查询 · 罗德岛终端</div><h1>{{ operator }}</h1><div class="card-subtitle">共 {{ rows|length }} 个技能</div></div></div>
+<div class="stripes"></div>
+{% for row in rows %}
+<div class="panel{% if row.highest %} highest{% endif %}">
+<div class="row skill-row"><div class="skill-name"><span class="row-label">技能</span><b>{{ row.label }}{% if row.highest %}<span class="highest-tag">最高</span>{% endif %}</b></div>
+<div class="metric"><span class="row-label">DPS</span><b>{{ row.get('DPS') or '—' }}</b></div>
+<div class="metric"><span class="row-label">总伤</span><b{% if row.get('总伤') == '不适用' %} class="not-applicable"{% endif %}>{{ row.get('总伤') or '—' }}</b></div>
+<div class="metric"><span class="row-label">DPS 排名</span><b>{% if row.dps_rank %}{{ row.dps_rank }} / {{ row.dps_rank_total }}{% else %}—{% endif %}</b></div>
+<div class="metric"><span class="row-label">总伤排名</span><b>{% if row.get('总伤') != '不适用' and row.dmg_rank %}{{ row.dmg_rank }} / {{ row.dmg_rank_total }}{% else %}—{% endif %}</b></div>
+</div>
+<div class="skill-details">{% for key in ['持续','初动','回转','部署费用','职业'] %}{{ key }} {{ row.get(key) or '—' }}{% if not loop.last %} / {% endif %}{% endfor %}</div>
+</div>
+{% endfor %}
+<div class="card-footer"><div>标准计算条件 · ark-dps.com · 数据 {{ updated }}<br>总伤排名：≥ 取下限参与，不适用不参与（全表 {{ total }} 条）</div></div>
+{% if stale %}<div class="empty">缓存数据已过期，请留意数据时间</div>{% endif %}
+</div></body></html>
