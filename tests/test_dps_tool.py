@@ -79,9 +79,10 @@ class RankTests(unittest.TestCase):
         self.assertFalse(rows[0]["总伤可排名"])
 
     def test_rosemary_ranks_and_templates(self):
-        from jinja2 import Environment, FileSystemLoader
+        from jinja2 import DictLoader, Environment
 
         from core.cards import build_dps_rank_context
+        from core.templates import MACROS, TEMPLATES
 
         # Fixed population: 186 exact totals, six lower bounds and 92 excluded rows.
         values = (
@@ -98,7 +99,7 @@ class RankTests(unittest.TestCase):
         self.assertEqual(sum(row["总伤可排名"] for row in rows), 192)
         self.assertEqual(sum(row["总伤下限"] for row in rows), 6)
         env = Environment(
-            loader=FileSystemLoader(Path(__file__).resolve().parents[1] / "templates"),
+            loader=DictLoader({**TEMPLATES, "_macros.html": MACROS}),
             autoescape=True,
         )
         card_rows = []
@@ -126,7 +127,7 @@ class RankTests(unittest.TestCase):
         self.assertIn("64 / 192", html)
         self.assertIn("110 / 192", html)
         self.assertIn("总伤排名：≥ 取下限参与，不适用不参与（全表 284 条）", html)
-        self.assertIn("总伤排名</span><b>—</b>", html)
+        self.assertRegex(html, r"总伤排名</div>\s*<b[^>]*>—</b>")
 
     def test_rank_context(self):
         from core.cards import build_dps_rank_context

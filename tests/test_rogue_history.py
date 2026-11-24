@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from jinja2 import DictLoader, Environment, StrictUndefined
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 sys.path.insert(0, str(Path(__file__).parent))
@@ -17,6 +17,7 @@ from framework_stub import ensure_framework_logger
 
 ensure_framework_logger()
 from core.daily import build_rogue_context  # noqa: E402
+from core.templates import MACROS, TEMPLATES  # noqa: E402
 
 
 def rogue_methods():
@@ -86,9 +87,9 @@ class RogueHistoryTests(unittest.TestCase):
                 self.assertEqual(extract(result)["maxModeGrade"], expected)
 
     def test_template_displays_missing_and_zero_values(self):
-        templates = Path(__file__).parents[1] / "templates"
         template = Environment(
-            loader=FileSystemLoader(templates), undefined=StrictUndefined
+            loader=DictLoader({**TEMPLATES, "_macros.html": MACROS}),
+            undefined=StrictUndefined,
         ).get_template("rogue.html")
         for value in (1354, 0, None):
             with self.subTest(value=value):
@@ -168,7 +169,7 @@ class RogueDifficultyFallbackTests(unittest.TestCase):
 
     def test_template_labels_history_and_preserves_existing_notes(self):
         template = Environment(
-            loader=FileSystemLoader(Path(__file__).parents[1] / "templates"),
+            loader=DictLoader({**TEMPLATES, "_macros.html": MACROS}),
             undefined=StrictUndefined,
         ).get_template("rogue.html")
         for history_grade, clear_info, expected, from_history in (

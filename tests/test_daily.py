@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from jinja2 import DictLoader, Environment, StrictUndefined
 
 from core.daily import (
     build_building_context,
@@ -16,6 +16,7 @@ from core.daily import (
     format_duration,
     mood_value,
 )
+from core.templates import MACROS, TEMPLATES
 
 CHAR_INFO = {
     "char_002_amiya": {"name": "阿米娅", "rarity": 4, "profession": "CASTER"},
@@ -221,7 +222,7 @@ class BuildingDurationTests(unittest.TestCase):
 
     def test_template_displays_timers_and_conditionally_renders_recycle(self):
         template = Environment(
-            loader=FileSystemLoader(Path(__file__).parents[1] / "templates"),
+            loader=DictLoader({**TEMPLATES, "_macros.html": MACROS}),
             undefined=StrictUndefined,
         ).get_template("building.html")
         for seconds, sharing in ((0, False), (None, False), (60, True)):

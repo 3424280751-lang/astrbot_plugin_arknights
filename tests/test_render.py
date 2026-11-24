@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from PIL import Image
 
-from core import render
+from core import render, templates
 
 
 def test_capture_is_usable_rejects_empty_file(tmp_path):
@@ -30,13 +30,16 @@ def test_max_card_px_is_conservative():
 
 @pytest.mark.parametrize(
     ("height", "png_bytes", "suffix"),
-    [(8000, None, ".png"), (8001, None, ".jpg"),
-     (100, 5 * 1024 * 1024, ".png"),
-     (100, 5 * 1024 * 1024 + 1, ".jpg")],
+    [
+        (8000, None, ".png"),
+        (8001, None, ".jpg"),
+        (100, 5 * 1024 * 1024, ".png"),
+        (100, 5 * 1024 * 1024 + 1, ".jpg"),
+    ],
 )
 def test_render_output_format(tmp_path, monkeypatch, height, png_bytes, suffix):
-    (tmp_path / "test.html").write_text("<div>test</div>", encoding="utf-8")
-    renderer = render.Renderer(tmp_path, tmp_path / "cache")
+    monkeypatch.setitem(templates.TEMPLATES, "test.html", "<div>test</div>")
+    renderer = render.Renderer(tmp_path / "cache")
     page = AsyncMock()
     page.locator = Mock(return_value=page)
     page.first = page

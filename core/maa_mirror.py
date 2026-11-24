@@ -110,7 +110,10 @@ class MAAMirror:
         self.expires = 0
 
     async def latest(self, proxy_url=""):
-        """Fetch current site metadata, reusing a fresh five-minute result.
+        """Fetch current release metadata, reusing a fresh five-minute result.
+
+        Falls back to the official GitHub release when the community mirror is
+        rate limited (Cloudflare error 1027) or its metadata cannot be parsed.
 
         Args:
             proxy_url: Existing optional local HTTP proxy.
@@ -127,24 +130,78 @@ class MAAMirror:
                 proxy=proxy_url or None,
                 trust_env=False,
             ) as client:
-                response = await client.get(MIRROR_PAGE)
-                response.raise_for_status()
-                if len(response.content) > 4_000_000:
-                    raise ValueError("Mirror page too large")
-                page = response.text
-                sources = re.findall(
-                    r'<script[^>]+src="([^"]+_payload\.json[^\"]*)"', page
-                )
-                if not sources:
-                    raise ValueError("No current payload address")
-                payload_url = urljoin(MIRROR_PAGE, sources[0])
-                if urlparse(payload_url).netloc != "git.hiwiki.org":
-                    raise ValueError("Unrecognized metadata host")
-                payload = await client.get(payload_url)
-                payload.raise_for_status()
-                if len(payload.content) > 4_000_000:
-                    raise ValueError("Mirror metadata too large")
-                result = parse_mirror_release(page, payload.text)
+                try:
+                    result = await self._from_mirror(client)
+                except Exception:
+                    result = await self._from_github(client)
             self.cached = result
             self.expires = time.monotonic() + 300
             return dict(result)
+
+    async def _from_mirror(self, client: httpx.AsyncClient) -> dict:
+        """Read the community mirror page and its published payload.
+
+        Args:
+            client: Shared HTTP client.
+
+        Returns:
+            Parsed release metadata.
+        """
+        response = await client.get(MIRROR_PAGE)
+        response.raise_for_status()
+        if len(response.content) > 4_000_000:
+            raise ValueError("Mirror page too large")
+        page = response.text
+        sources = re.findall(r'<script[^>]+src="([^"]+_payload\.json[^\"]*)"', page)
+        if not sources:
+            raise ValueError("No current payload address")
+        payload_url = urljoin(MIRROR_PAGE, sources[0])
+        if urlparse(payload_url).netloc != "git.hiwiki.org":
+            raise ValueError("Unrecognized metadata host")
+        payload = await client.get(payload_url)
+        payload.raise_for_status()
+        if len(payload.content) > 4_000_000:
+            raise ValueError("Mirror metadata too large")
+        return parse_mirror_release(page, payload.text)
+
+    async def _from_github(self, client: httpx.AsyncClient) -> dict:
+        """Fall back to the official GitHub release assets.
+
+        Args:
+            client: Shared HTTP client.
+
+        Returns:
+            Release metadata pointing at the official download asset.
+        """
+        response = await client.get(
+            "https://api.github.com/repos/MaaAssistantArknights/"
+            "MaaAssistantArknights/releases/latest",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "astrbot-plugin-arknights",
+            },
+        )
+        response.raise_for_status()
+        release = response.json()
+        tag = str(release.get("tag_name") or "")
+        filename = f"MAA-{tag}-win-x64.zip"
+        asset = next(
+            (
+                item
+                for item in release.get("assets") or []
+                if item.get("name") == filename
+            ),
+            None,
+        )
+        if not tag or not asset:
+            raise ValueError("Latest release has no full Windows x64 package")
+        return {
+            "version": tag,
+            "filename": filename,
+            "url": str(asset.get("browser_download_url") or ""),
+            "sha256": "",
+            "page": (
+                "https://github.com/MaaAssistantArknights/"
+                "MaaAssistantArknights/releases/latest"
+            ),
+        }

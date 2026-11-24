@@ -2,6 +2,8 @@
 
 import ast
 import asyncio
+import os
+import random
 import re
 import shutil
 import sys
@@ -33,6 +35,7 @@ from core.operators import (  # noqa: E402
     group_operators,
 )
 from core.render import Renderer  # noqa: E402
+from core.templates import BASE_CSS  # noqa: E402
 
 NOW = time.time()
 
@@ -341,12 +344,11 @@ ANNOUNCE_BODY = (
 
 
 async def main() -> None:
+    random.seed(int(os.environ.get("AK_PREVIEW_SEED", "20261112")))
     root = Path(__file__).resolve().parents[1]
-    templates = root / "templates"
     preview_dir = root / "docs" / "preview"
     preview_dir.mkdir(parents=True, exist_ok=True)
-    renderer = Renderer(templates, Path("/tmp/akrender"), 60000)
-    base_css = (templates / "base.css").read_text(encoding="utf-8")
+    renderer = Renderer(Path("/tmp/akrender"), 60000)
 
     note = build_note_context(PLAYER, now=NOW)
     sanity = build_sanity_context(PLAYER, now=NOW)
@@ -405,7 +407,7 @@ async def main() -> None:
     ]
     for template, key, context in cards:
         path = await renderer.render_html(
-            template, {"base_css": base_css, "version": _plugin_version(), key: context}
+            template, {"base_css": BASE_CSS, "version": _plugin_version(), key: context}
         )
         if path is None:
             print(f"{template} -> 渲染失败")

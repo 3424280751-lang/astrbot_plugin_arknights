@@ -26,6 +26,7 @@ import jinja2
 from astrbot.api import logger
 from PIL import Image
 
+from . import templates
 from .easter_eggs import decorate_html
 
 ASSET_PATTERN = re.compile(r"__ASSET__/([A-Za-z0-9_./-]+)")
@@ -81,7 +82,6 @@ class Renderer:
 
     def __init__(
         self,
-        templates_dir: Path,
         cache_dir: Path,
         timeout_ms: int = 30000,
         proxy_url: str = "",
@@ -89,18 +89,22 @@ class Renderer:
         """Initialize the renderer.
 
         Args:
-            templates_dir: Directory containing the HTML templates and assets.
             cache_dir: Directory that receives the rendered images.
             timeout_ms: Per render timeout in milliseconds.
             proxy_url: Optional proxy for public image downloads.
+
+        Returns:
+            None.
         """
-        self.templates_dir = Path(templates_dir)
         self.cache_dir = Path(cache_dir)
         self.timeout_ms = timeout_ms
         self.proxy_url = proxy_url.strip()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._template_cache: dict[str, str] = {}
         self._env = jinja2.Environment(
-            loader=jinja2.FileSystemLoader(str(self.templates_dir)),
+            loader=jinja2.FunctionLoader(self._template_source),
+            auto_reload=False,
+            cache_size=-1,
             autoescape=True,
         )
         self._lock = asyncio.Lock()
@@ -266,16 +270,35 @@ class Renderer:
         except OSError as exc:
             logger.debug("清理渲染缓存失败: %s", exc)
 
+    def _template_source(self, name: str) -> str | None:
+        """Load immutable template source and inline its static assets once.
+
+        Args:
+            name: Embedded template or shared macro name.
+
+        Returns:
+            Cached source, or None for an unknown template.
+        """
+        if name not in self._template_cache:
+            if name == "_macros.html":
+                source = templates.MACROS
+            elif name in templates.TEMPLATES:
+                source = templates.get(name)
+            else:
+                return None
+            self._template_cache[name] = self._inline_assets(source)
+        return self._template_cache[name]
+
     def _inline_assets(self, html: str) -> str:
         """Replace ``__ASSET__/`` references with base64 data URIs.
 
         Args:
-            html: Rendered template HTML.
+            html: Static template source before variable substitution.
 
         Returns:
             HTML with local asset references inlined.
         """
-        root = self.templates_dir.resolve()
+        root = (Path(__file__).resolve().parents[1] / "templates").resolve()
 
         def replace(match: re.Match[str]) -> str:
             candidate = (root / match.group(1)).resolve()
@@ -338,7 +361,7 @@ class Renderer:
                             else:
                                 response = await route.request.frame.page.context.request.get(
                                     "https://data.jsdelivr.com/v1/packages/gh/yuanyan3060/ArknightsGameResource@main",
-                                    timeout=12000,
+                                    timeout=30000,
                                 )
                                 if response.status != 200:
                                     raise ValueError(f"Index HTTP {response.status}")
@@ -422,7 +445,7 @@ class Renderer:
                     body = b""
                     for url in urls:
                         try:
-                            response = await route.fetch(url=url, timeout=12000)
+                            response = await route.fetch(url=url, timeout=30000)
                             attempts.append(f"{url}: HTTP {response.status}")
                             content_type = response.headers.get(
                                 "content-type", "image/png"
@@ -585,7 +608,7 @@ class Renderer:
         """Render a template to an image file.
 
         Args:
-            template_name: Template filename relative to ``templates_dir``.
+            template_name: Embedded template name.
             data: Variables passed to the template.
 
         Returns:
@@ -596,10 +619,9 @@ class Renderer:
             # the decoration theme follows the template, so callers only supply
             # their own data
             render_data = dict(data or {})
+            render_data.setdefault("base_css", templates.BASE_CSS)
             render_data["card_class"] = CARD_THEMES.get(template_name, "")
-            html = self._inline_assets(
-                self._env.get_template(template_name).render(**render_data)
-            )
+            html = self._env.get_template(template_name).render(**render_data)
         except Exception as exc:  # noqa: BLE001 - template errors degrade to text
             logger.error("渲染模板 %s 失败: %s", template_name, exc)
             return None
@@ -658,13 +680,9 @@ class Renderer:
                     await decorate_html(page)
                 except Exception as exc:
                     logger.debug("Optional easter egg skipped: %s", type(exc).__name__)
-                await page.screenshot(
-                    path=str(output), clip=box, type="png"
-                )
+                await page.screenshot(path=str(output), clip=box, type="png")
             else:
-                await page.screenshot(
-                    path=str(output), full_page=True, type="png"
-                )
+                await page.screenshot(path=str(output), full_page=True, type="png")
             failed = await page.evaluate(
                 "() => Array.from(document.images).filter(img => img.naturalWidth === 0).map(img => img.src)"
             )

@@ -507,9 +507,7 @@ async def main() -> int:
     )
     plugin.store = Store(Path("/tmp/ak-integration/users.json"))
     plugin.store.path.unlink(missing_ok=True)
-    renderer = Renderer(
-        PLUGIN_ROOT / "templates", Path("/tmp/ak-integration/cache"), 30000
-    )
+    renderer = Renderer(Path("/tmp/ak-integration/cache"), 30000)
     plugin._renderer = renderer
 
     # ── 公告：列表出图、按编号看正文、失败给出明确提示 ──
@@ -1261,8 +1259,21 @@ async def main() -> int:
 
     plugin.skland.get_authorization = fake_authorization
     plugin.skland.get_credential = fake_credential
+
     async def fake_rogue_info(cred, uid: str, topic_id: str) -> dict:
-        return {"topics": [{"id": topic_id, "isSelected": True}], "career": {"node": 123, "clearInfo": {"difficulty": "测试难度", "grade": 5, "endings": [], "endingGrade": {}}}, "all": {}}
+        return {
+            "topics": [{"id": topic_id, "isSelected": True}],
+            "career": {
+                "node": 123,
+                "clearInfo": {
+                    "difficulty": "测试难度",
+                    "grade": 5,
+                    "endings": [],
+                    "endingGrade": {},
+                },
+            },
+            "all": {},
+        }
 
     plugin.skland.get_rogue_info = fake_rogue_info
     plugin.skland.get_player_info = fake_player_info

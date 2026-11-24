@@ -51,7 +51,15 @@ from .core.feed import DEFAULT_BASE_URL, FeedClient, FeedError, _body_html
 from .core.gacha import GachaClient, GachaError, analyze, format_record_time
 from .core.gacha_store import GachaStore
 from .core.gamedata import GameData
-from .core.garrison import GarrisonClient, GarrisonError, build_context
+from .core.garrison import (
+    GarrisonClient,
+    GarrisonError,
+    GarrisonTrophyRanking,
+    build_context,
+    build_list_context,
+    build_summary_context,
+    parse_count,
+)
 from .core.hypergryph import HypergryphClient, HypergryphError
 from .core.maa_mirror import MIRROR_PAGE, MAAMirror
 from .core.operators import (
@@ -65,9 +73,10 @@ from .core.render import Renderer
 from .core.sign_picture import render_sign_picture
 from .core.skland import SignInResult, SklandClient, SklandError, UserBinding
 from .core.store import Store
+from .core.templates import BASE_CSS
 
 PLUGIN_NAME = "astrbot_plugin_arknights"
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.6.0"
 
 # How often the health watchdog probes the self-hosted service, and how many
 # consecutive bad observations it takes to raise an alert. The service writes
@@ -135,7 +144,10 @@ ark剿灭              剿灭作战与本周合成玉
 ark肉鸽              集成战略收藏品与投资
 ark任务              每日/每周任务与周常奖励
 ark公招              公开招募栏位状态
-ark卫戍战绩          卫戍协议最近 3 局战绩
+ark卫戍战绩          卫戍协议最近 3 局战绩（可加数字 1-6）
+ark卫戍列表          卫戍协议最近 15 场（可加数字 1-30）
+ark卫戍便签          卫戍协议统计便签（总场数/通关/奖杯/各难度）
+ark卫戍排行          绑定角色卫戍奖杯排名（默认本群，加「总」查全部）
 
 【官方公告】
 ark公告              公告列表（`ark公告 <编号>` 看正文）
@@ -207,7 +219,19 @@ HELP_SECTIONS = [
             {"cmd": "ark肉鸽", "desc": "集成战略收藏品与投资"},
             {"cmd": "ark任务", "desc": "每日/每周任务与周常奖励"},
             {"cmd": "ark公招", "desc": "公开招募栏位状态"},
-            {"cmd": "ark卫戍战绩", "desc": "卫戍协议最近 3 局战绩"},
+            {
+                "cmd": "ark卫戍战绩",
+                "desc": "卫戍协议最近 3 局战绩（可加数字 1-6）",
+            },
+            {"cmd": "ark卫戍列表", "desc": "卫戍协议最近 15 场（可加数字 1-30）"},
+            {
+                "cmd": "ark卫戍便签",
+                "desc": "卫戍协议统计便签（总场数/通关/奖杯/各难度）",
+            },
+            {
+                "cmd": "ark卫戍排行",
+                "desc": "绑定角色卫戍奖杯排名（默认本群，加「总」查全部）",
+            },
         ],
     },
     {
@@ -283,6 +307,12 @@ class ArknightsPlugin(Star):
         self.config: dict[str, Any] = config if config is not None else {}
         self.store = Store()
         self.skland = SklandClient()
+        self._garrison_trophies = GarrisonTrophyRanking(
+            Path(get_astrbot_plugin_data_path())
+            / PLUGIN_NAME
+            / "garrison_trophy_cache.json",
+            self.skland,
+        )
         self.hypergryph = HypergryphClient()
         self._qr_tasks: set[asyncio.Task[None]] = set()
         self._maa_mirror = MAAMirror()
@@ -294,9 +324,8 @@ class ArknightsPlugin(Star):
             PUBLIC_COMMANDS.setdefault(PLUGIN_NAME, set()).update({"arkmaa", "ark海嗣"})
         except ImportError:
             pass  # The optional deployment policy is not part of upstream AstrBot.
-        self._templates_dir = Path(__file__).parent / "templates"
         self._renderer: Renderer | None = None
-        self._base_css: str | None = None
+        self._base_css: str = BASE_CSS
         # uid -> (expiry timestamp, player info payload)
         self._player_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._gamedata = GameData(
@@ -338,7 +367,6 @@ class ArknightsPlugin(Star):
         await self._refresh_prts_total()
         self._dps_task = asyncio.create_task(self._warm_dps_cache())
         self._renderer = Renderer(
-            self._templates_dir,
             Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME / "render_cache",
             proxy_url=str(self.config.get("asset_proxy_url") or ""),
         )
@@ -755,7 +783,7 @@ class ArknightsPlugin(Star):
         """Render a card image.
 
         Args:
-            template: Template filename inside the plugin's ``templates`` dir.
+            template: Embedded template name.
             data: Template variables.
 
         Returns:
@@ -767,19 +795,10 @@ class ArknightsPlugin(Star):
                 Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME / "render_cache"
             )
             self._renderer = Renderer(
-                self._templates_dir,
                 cache_dir,
                 int(self.config.get("render_timeout", 30000) or 30000),
                 proxy_url=str(self.config.get("asset_proxy_url") or ""),
             )
-        if self._base_css is None:
-            try:
-                self._base_css = (self._templates_dir / "base.css").read_text(
-                    encoding="utf-8"
-                )
-            except OSError as exc:
-                logger.error("读取 base.css 失败: %s", exc)
-                self._base_css = ""
         payload: dict[str, Any] = {
             "base_css": self._base_css,
             "version": PLUGIN_VERSION,
@@ -980,17 +999,45 @@ class ArknightsPlugin(Star):
 
     @filter.command("arkmaa")
     async def maa_download(self, event: AstrMessageEvent):
-        """Return the mirror site's current stable full Windows x64 package."""
+        """Return the current stable full Windows x64 package and both links."""
         try:
             info = await self._maa_mirror.latest(
                 str(self.config.get("asset_proxy_url") or "")
             )
-            text = f"MAA {info['version']} · Windows x64 稳定版\n{info['filename']}\n镜像下载：\n{info['url']}\n来源：{MIRROR_PAGE}"
+            tag = str(info["version"])
+            filename = str(info["filename"])
+            github_url = (
+                "https://github.com/MaaAssistantArknights/MaaAssistantArknights"
+                f"/releases/download/{tag}/{filename}"
+            )
+            lines = [
+                f"MAA {tag} · Windows x64 稳定版",
+                filename,
+                "",
+                "官方原链（GitHub）：",
+                github_url,
+                "",
+                "加速下载（镜像）：",
+                str(info["url"]),
+                "",
+                "把上面的 GitHub 链接粘到 https://ghproxylist.com/ 也能换成加速下载",
+            ]
             if info.get("sha256"):
-                text += "\nSHA256：" + info["sha256"]
+                lines.append("")
+                lines.append("SHA256：" + str(info["sha256"]))
+            text = chr(10).join(lines)
         except Exception as exc:
             logger.warning("MAA mirror lookup failed: %s", type(exc).__name__)
-            text = "暂时无法取得最新下载直链，请打开镜像页面查看：\n" + MIRROR_PAGE
+            text = chr(10).join([
+                "暂时没取到最新下载直链，可以自己挑：",
+                "官方发布页（GitHub）：",
+                "https://github.com/MaaAssistantArknights/MaaAssistantArknights/releases/latest",
+                "",
+                "把 GitHub 的下载链接粘到 https://ghproxylist.com/ 就能加速下载",
+                "",
+                "镜像站页面：",
+                MIRROR_PAGE,
+            ])
         yield event.plain_result(text)
 
     @filter.command("ark海嗣")
@@ -1601,7 +1648,13 @@ class ArknightsPlugin(Star):
         path = self._sign_journal_path()
         if not path.exists():
             return {}
-        return json.loads(path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # A truncated or zero-filled journal must not kill the whole run.
+            logger.warning("[AutoSign] journal unreadable, starting a fresh record")
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def _write_sign_journal(self, journal: dict) -> None:
         path = self._sign_journal_path()
@@ -2072,6 +2125,7 @@ class ArknightsPlugin(Star):
     @filter.command("ark卫戍战绩")
     async def show_garrison(self, event: AstrMessageEvent):
         """Show the most recent garrison (卫戍协议) records as a card."""
+        limit = min(6, max(1, parse_count(event.message_str, 3)))
         resolved = await self._resolve_binding(event)
         if not resolved:
             yield event.plain_result(NO_BINDING_TEXT)
@@ -2092,7 +2146,9 @@ class ArknightsPlugin(Star):
         # The assistant operator name often needs the plugin's own table (Amiya
         # is absent from the guide resource), so make sure it is loaded.
         await self._gamedata.ensure()
-        context = build_context(resource, records, data, self._gamedata.char_names)
+        context = build_context(
+            resource, records, data, self._gamedata.char_names, limit=limit
+        )
         if not context["records"]:
             yield event.plain_result("没有查询到卫戍协议战绩。")
             return
@@ -2101,6 +2157,217 @@ class ArknightsPlugin(Star):
             yield event.plain_result(self._garrison_text(context))
             return
         yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @filter.command("ark卫戍列表")
+    async def show_garrison_list(self, event: AstrMessageEvent):
+        """Show recent garrison records as a compact table."""
+        limit = min(30, max(1, parse_count(event.message_str, 15)))
+        resolved = await self._resolve_binding(event)
+        if not resolved:
+            yield event.plain_result(NO_BINDING_TEXT)
+            return
+        user, binding = resolved
+        try:
+            authorization = await self.skland.get_authorization(
+                str(user.get("token") or "")
+            )
+            cred = await self.skland.get_credential(authorization)
+            data = await self._player_data(user, binding)
+            resource, records = await GarrisonClient(self.skland).fetch(
+                cred, str(binding.get("uid") or "")
+            )
+        except (SklandError, GarrisonError) as exc:
+            yield event.plain_result(await self._report_query_error(event, exc))
+            return
+        # The assistant operator name often needs the plugin's own table (Amiya
+        # is absent from the guide resource), so make sure it is loaded.
+        await self._gamedata.ensure()
+        context = build_list_context(
+            resource, records, data, self._gamedata.char_names, limit=limit
+        )
+        if not context["rows"]:
+            yield event.plain_result("没有查询到卫戍协议战绩。")
+            return
+        image = await self._render("garrison_list.html", {"garrison": context})
+        if image is None:
+            yield event.plain_result(self._garrison_list_text(context))
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @filter.command("ark卫戍排行")
+    async def show_garrison_trophy(self, event: AstrMessageEvent):
+        """按绑定角色统计卫戍奖杯：默认本群，带「总」则统计全部绑定。"""
+        text = event.message_str.strip()
+        parts = text.split()
+        command_words = ("ark卫戍排行", "ark卫戍奖杯")
+        if parts and parts[0] in command_words:
+            arg = " ".join(parts[1:]).strip()
+            single = ""
+        else:
+            arg = ""
+            # 缩写直接连写，例如 wsphz / wsphs / wsphzs
+            single = parts[0].lower() if parts else ""
+        tokens = [item.lower() for item in arg.replace("，", " ").split() if item]
+        want_all = (
+            any(word in arg for word in ("总", "全部", "所有", "all", "ALL"))
+            or any(item in ("z", "t", "total") for item in tokens)
+            or single.endswith(("z", "zs", "sz"))
+        )
+        force = (
+            any(word in arg for word in ("刷新", "刷新一下", "refresh"))
+            or any(item in ("s", "sx", "r", "ref") for item in tokens)
+            or single.endswith(("s", "zs", "sz", "sx"))
+        )
+        scope_label = "全部绑定" if want_all else "本群"
+        sender = str(event.get_sender_id())
+        users = await self.store.all_users()
+
+        member_ids: set[str] | None = None
+        if not want_all:
+            group_id = event.get_group_id()
+            if not group_id:
+                yield event.plain_result(
+                    "私聊里只能查全部绑定，用 ark卫戍排行 总；本群排名请在群里发。"
+                )
+                return
+            try:
+                members = await event.bot.call_action(
+                    "get_group_member_list", group_id=int(group_id)
+                )
+                if not isinstance(members, list):
+                    raise ValueError("Invalid group member list")
+            except Exception:
+                yield event.plain_result(
+                    "无法获取本群成员列表，可以改用 ark卫戍排行 总 查全部绑定。"
+                )
+                return
+            member_ids = {
+                str(member.get("user_id"))
+                for member in members
+                if isinstance(member, dict)
+            }
+
+        roles: dict[str, tuple[str, str]] = {}
+        own_uids: set[str] = set()
+        for user_id, user in users.items():
+            if member_ids is not None and user_id not in member_ids:
+                continue
+            if not user.get("token"):
+                continue
+            uid = str(user.get("primary_uid") or "")
+            if not uid:
+                continue
+            for binding in user.get("bindings") or []:
+                if str(binding.get("uid")) == uid:
+                    roles.setdefault(
+                        uid,
+                        (
+                            str(binding.get("nick_name") or uid),
+                            str(user["token"]),
+                        ),
+                    )
+                    if user_id == sender:
+                        own_uids.add(uid)
+                    break
+
+        if not roles:
+            yield event.plain_result(
+                "本群还没有成员绑定森空岛角色，请先绑定后重试。"
+                if not want_all
+                else "还没有任何人绑定森空岛角色。"
+            )
+            return
+
+        tail = "（强制刷新）" if force else ""
+        yield event.plain_result(f"正在统计{scope_label}的卫戍奖杯…{tail}")
+        context = await self._garrison_trophies.rank(
+            roles, own_uids, force=force
+        )
+        summary = (
+            f"{scope_label} · 共 {context['entries']} 个绑定角色 · "
+            f"更新于 {context['updated']}"
+        )
+        skipped = f"拉取失败 {context['failed']} 个 · 无奖杯记录 {context['empty']} 个"
+        if not context["rows"]:
+            yield event.plain_result(
+                f"{scope_label}暂无可排名的卫戍奖杯记录。{chr(10)}{skipped}"
+            )
+            return
+        context.update(summary=summary, skipped=skipped)
+        image = None
+        try:
+            image = await self._render("garrison_trophy.html", {"gt": context})
+        except Exception:
+            logger.warning("Garrison trophy card rendering failed")
+            image = None
+        if image is not None:
+            yield event.chain_result([Image.fromFileSystem(str(image))])
+            return
+        lines = ["卫戍排行", summary, skipped]
+        for row in context["rows"][:20]:
+            own = "（你）" if row["own"] else ""
+            lines.append(
+                f"{row['rank']}. {row['name']}{own} — {row['trophy']} 杯"
+                f"（uid {row['uid']} · {row['games']} 场记录）"
+            )
+        if len(context["rows"]) > 20:
+            lines.append("仅显示前 20 条排名")
+        yield event.plain_result(chr(10).join(lines))
+
+    @filter.command("ark卫戍便签")
+    async def show_garrison_note(self, event: AstrMessageEvent):
+        """Show an aggregated garrison (卫戍协议) statistics card."""
+        resolved = await self._resolve_binding(event)
+        if not resolved:
+            yield event.plain_result(NO_BINDING_TEXT)
+            return
+        user, binding = resolved
+        try:
+            authorization = await self.skland.get_authorization(
+                str(user.get("token") or "")
+            )
+            cred = await self.skland.get_credential(authorization)
+            data = await self._player_data(user, binding)
+            resource, records = await GarrisonClient(self.skland).fetch(
+                cred, str(binding.get("uid") or "")
+            )
+        except (SklandError, GarrisonError) as exc:
+            yield event.plain_result(await self._report_query_error(event, exc))
+            return
+        await self._gamedata.ensure()
+        context = build_summary_context(
+            resource, records, data, self._gamedata.char_names
+        )
+        if not context["total"]:
+            yield event.plain_result("没有查询到卫戍协议记录。")
+            return
+        image = await self._render("garrison_note.html", {"gn": context})
+        if image is None:
+            yield event.plain_result(self._garrison_summary_text(context))
+            return
+        yield event.chain_result([Image.fromFileSystem(str(image))])
+
+    @staticmethod
+    def _garrison_summary_text(context: dict[str, Any]) -> str:
+        """Build the plain text fallback for the garrison statistics card."""
+        user = context["user"]
+        lines = [
+            "卫戍便签",
+            (
+                f"{user['name'] or '未知'} · uid {user['uid']} · "
+                f"{context['season_name']} · {context['version']}"
+            ),
+            (
+                f"总场数 {context['total']} · 通关 {context['cleared']}"
+                f"（{context['clear_rate']}%）· 奖杯 {context['trophy_now']}"
+            ),
+        ]
+        for item in context["by_difficulty"]:
+            lines.append(
+                f"{item['name']}：{item['cleared']} / {item['total']}（{item['rate']}%）"
+            )
+        lines.append(f"记录区间 {context['span']}")
+        return chr(10).join(lines)
 
     @staticmethod
     def _garrison_text(context: dict[str, Any]) -> str:
@@ -2134,6 +2401,32 @@ class ArknightsPlugin(Star):
                 f"   奖杯 {item['trophy_before']}→{item['trophy_after']} · "
                 f"击杀 {item['kill_cnt']} · 金币 {item['coin_cost']}"
             )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _garrison_list_text(context: dict[str, Any]) -> str:
+        """Build the bounded text fallback for the garrison table.
+
+        Args:
+            context: Context produced by ``build_list_context``.
+
+        Returns:
+            Summary followed by at most ten battle rows.
+        """
+        summary = context["summary"]
+        lines = [
+            f"卫戍战绩列表 · {context['user']['name']}",
+            f"共 {summary['total']} 场 · 显示最近 {summary['shown']} 场 · "
+            f"通关 {summary['cleared']} 场（{summary['cleared_percent']}%）",
+        ]
+        for row in context["rows"][:10]:
+            result = "成功" if row["success"] else "失败"
+            lines.append(
+                f"{row['start']} {row['difficulty']}/{row['mode']} {result} "
+                f"{row['trophy']} {row['rounds']} [{row['core_ops']}]"
+            )
+        if len(context["rows"]) > 10:
+            lines.append(f"……共 {summary['total']} 场，这里只列前 10 场")
         return "\n".join(lines)
 
     # ── headhunting ───────────────────────────────────────────────────────

@@ -32,14 +32,14 @@ class MirrorTests(unittest.IsolatedAsyncioTestCase):
                 fulfill=AsyncMock(),
                 abort=AsyncMock(),
             )
-            renderer = Renderer(root, root / "cache")
+            renderer = Renderer(root / "cache")
             await renderer._cached_image_route(route)
             self.assertIn(
                 "/portrait/char_4064_mlynar_2.png",
                 route.fetch.call_args_list[0].kwargs["url"],
             )
             self.assertEqual(route.fetch.await_count, 2)
-            await Renderer(root, root / "cache")._cached_image_route(route)
+            await Renderer(root / "cache")._cached_image_route(route)
             self.assertEqual(route.fetch.await_count, 2)
             route.abort.assert_not_awaited()
 
@@ -67,12 +67,12 @@ class MirrorTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             url = "https://torappu.prts.wiki/assets/skill_icon/icon.png"
-            first = Renderer(root, root / "cache")
+            first = Renderer(root / "cache")
             urls = await first._public_image_candidates(url, route)
             self.assertTrue(any("@main/skill/icon.png" in u for u in urls))
             index = root / "cache/public_assets/basename_index.json"
             self.assertEqual(
                 json.loads(index.read_text())["icon.png"], ["skill/icon.png"]
             )
-            await Renderer(root, root / "cache")._public_image_candidates(url, route)
+            await Renderer(root / "cache")._public_image_candidates(url, route)
             get.assert_awaited_once()

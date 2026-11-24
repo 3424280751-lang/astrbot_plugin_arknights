@@ -82,5 +82,4 @@ def test_wide_artwork_fills_portrait_panel_without_shrinking_subject(tmp_path):
         assert shifted + 1100 * scale >= 292
         assert shifted + 100 * scale <= 8
 
-
     asyncio.run(check())

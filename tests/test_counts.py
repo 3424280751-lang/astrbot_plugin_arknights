@@ -79,7 +79,7 @@ class CountTests(unittest.TestCase):
 class DirectMirrorTests(unittest.IsolatedAsyncioTestCase):
     async def test_direct_rules_skip_index_and_prefer_mirror(self):
         with tempfile.TemporaryDirectory() as directory:
-            renderer = Renderer(Path(directory), Path(directory) / "cache")
+            renderer = Renderer(Path(directory) / "cache")
             for kind, path in [
                 ("char_avatar", "avatars/char_002_amiya.png"),
                 ("char_portrait", "portrait/char_002_amiya_2.png"),
@@ -176,7 +176,7 @@ class WarmupTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import AsyncMock
 
         with tempfile.TemporaryDirectory() as directory:
-            renderer = Renderer(Path(directory), Path(directory) / "cache")
+            renderer = Renderer(Path(directory) / "cache")
             active = maximum = 0
             downloaded = []
             handler = None
@@ -254,12 +254,12 @@ class FailureCacheTests(unittest.IsolatedAsyncioTestCase):
                 fetch=AsyncMock(return_value=SimpleNamespace(status=404, headers={})),
                 abort=AsyncMock(),
             )
-            await Renderer(root, root / "cache")._cached_image_route(route)
+            await Renderer(root / "cache")._cached_image_route(route)
             attempts = route.fetch.await_count
             self.assertGreater(attempts, 0)
-            await Renderer(root, root / "cache")._cached_image_route(route)
+            await Renderer(root / "cache")._cached_image_route(route)
             self.assertEqual(route.fetch.await_count, attempts)
             failure = next((root / "cache/public_assets").glob("*.failed"))
             os.utime(failure, (time.time() - 301, time.time() - 301))
-            await Renderer(root, root / "cache")._cached_image_route(route)
+            await Renderer(root / "cache")._cached_image_route(route)
             self.assertGreater(route.fetch.await_count, attempts)

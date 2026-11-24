@@ -1,5 +1,3 @@
-> **2026-11-11 · 0.5.0 更新**：新增 ark卫戍战绩，展示卫戍协议最近三局记录；完善 DPS 多技能卡、DPS 与总伤双排名、肉鸽历史最高分与等级，以及基建详情。
-
 > **2026-11-02 定制版更新**：新增干员 DPS / 总伤查询与卡片、PRTS 干员总数和收集进度；`arkdps <干员>` 只报名字即可生成多技能卡，逐行展示各技能 DPS / 总伤 / 排名并高亮最高 DPS；优化干员列表、便签渲染及资源镜像，补充签到群通知与回归测试。
 
 > **2026-10-24 定制版更新**：保留已有专精、模组、潜能统计、助理立绘适配、签到补偿与查询优化；新增签到图片通知、随机羽毛笔彩蛋、`/arkmaa` 最新稳定版镜像下载和 `/ark海嗣` 随机动图，文字及图片帮助同步补充说明。彩蛋只在安全空白处随机出现，也可能不出现。
@@ -19,7 +17,7 @@
 ### *罗德岛终端 · 明日方舟 AstrBot 插件*
 
 [![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-FFB400?style=for-the-badge&logo=python)](https://github.com/AstrBotDevs/AstrBot)
-[![Version](https://img.shields.io/badge/version-0.5.0-FFB400?style=for-the-badge)](#-更新日志)
+[![Version](https://img.shields.io/badge/version-0.6.0-FFB400?style=for-the-badge)](#-更新日志)
 [![License](https://img.shields.io/badge/license-MIT-FFB400?style=for-the-badge)](LICENSE)
 
 ### 🚀 基于森空岛官方接口的明日方舟查询工具
@@ -138,8 +136,8 @@ astrbot_plugin_arknights/
 │   ├── operators.py        # 干员分组、查找与详情
 │   ├── assets.py           # 图像资源 URL 组装
 │   ├── render.py           # Playwright + Jinja2 渲染器
+│   ├── templates.py        # 内联卡片模板与共享样式
 │   └── store.py            # 绑定与订阅持久化（原子写 + 0600）
-├── templates/              # 卡片模板（Jinja2 + CSS）
 ├── tests/                  # 单元测试与集成检查
 └── docs/                   # 设计文档与实施计划
 ```
@@ -306,19 +304,19 @@ astrbot_plugin_arknights/
 
 ## 🎨 自定义美化
 
-卡片模板位于插件目录的 `templates/`，直接用 HTML + CSS 编写，可以自由替换配色与版式：
+卡片模板与样式内联在 `core/templates.py` 的 Python 字符串中：共享样式为 `BASE_CSS`，模板及其引用的样式片段为 `TEMPLATES`。修改对应常量即可替换配色与版式，卡片渲染不再依赖独立的 `templates/` 目录（测试夹具与运行时 HTML 数据保持不变）：
 
 | 文件 | 对应卡片 |
 |:-----|:---------|
-| `templates/base.css` | 全局配色、卡片主题与组件样式（`--theme` 控制每张卡的主色） |
-| `templates/note.html` | 便签 |
-| `templates/sanity.html` | 理智 |
-| `templates/operator_list.html` / `operator.html` | 干员图鉴 / 干员详情 |
-| `templates/building.html` | 基建 |
-| `templates/campaign.html` / `rogue.html` / `task.html` / `recruit.html` | 剿灭 / 集成战略 / 任务 / 公招 |
-| `templates/gacha.html` | 抽卡分析 |
-| `templates/announce.html` | 官方公告 |
-| `templates/help.html` | 帮助菜单 |
+| `BASE_CSS` | 全局配色、卡片主题与组件样式（`--theme` 控制每张卡的主色） |
+| `TEMPLATES["note.html"]` | 便签 |
+| `TEMPLATES["sanity.html"]` | 理智 |
+| `TEMPLATES["operator_list.html"]` / `TEMPLATES["operator.html"]` | 干员图鉴 / 干员详情 |
+| `TEMPLATES["building.html"]` | 基建 |
+| `TEMPLATES["campaign.html"]` / `TEMPLATES["rogue.html"]` / `TEMPLATES["task.html"]` / `TEMPLATES["recruit.html"]` | 剿灭 / 集成战略 / 任务 / 公招 |
+| `TEMPLATES["gacha.html"]` | 抽卡分析 |
+| `TEMPLATES["announce.html"]` | 官方公告 |
+| `TEMPLATES["help.html"]` | 帮助菜单 |
 
 想换某张卡的配色，改它主题块里的 `--theme` / `--theme-2` 即可；想改全局默认色，改 `:root` 里的同名变量。
 
@@ -369,6 +367,16 @@ astrbot_plugin_arknights/
 ---
 
 ## 📜 更新日志
+
+### 0.6.0 (2026-11-12)
+
+- 新增 `ark卫戍排行`，默认统计本群已绑定角色的奖杯，支持查询全部绑定角色和刷新缓存。
+- 模板与样式内联进 `core/templates.py`，卡片渲染不再依赖独立的 `templates/` 目录（测试夹具与运行时 HTML 数据保持不变）；行为与渲染结果不变。
+
+### 0.5.1 (2026-11-12)
+
+- `ark卫戍战绩 [N]` 支持可选整数，默认最近 3 局，自动夹紧到 1-6；没有或非法参数使用默认值。
+- 新增 `ark卫戍列表 [M]`：默认最近 15 场，自动夹紧到 1-30，紧凑表格显示时间、难度、模式、结果、奖杯、回合和按等级排序的前三名核心干员；汇总全部记录的通关数与通关率，渲染失败时文字最多列 10 场。
 
 <details>
 <summary>点击展开版本历史</summary>
@@ -587,3 +595,9 @@ astrbot_plugin_arknights/
 ### 如果喜欢这个插件，别忘了给仓库点个 ⭐
 
 </div>
+
+**卫戍战绩**：`ark卫戍战绩 [N]` 取森空岛当前赛季的卫戍协议记录，默认显示最近 3 局，可加数字 1-6（越界自动夹紧），展示胜负、通关回合、模式与难度、策略、棋子阵容与等级、核心盟约层数、奖杯/击杀/金币变化，顶部带角色信息与助理干员。
+
+
+
+**卫戍战绩列表**：`ark卫戍列表 [M]` 默认显示最近 15 场，可加数字 1-30（越界自动夹紧）。表格列出时间、难度、模式、成功/失败、奖杯、回合及前三名核心干员，并按接口返回的全部记录汇总通关率；图片不可用时最多列出前 10 场文字。两条命令没有或使用非法参数时均采用默认数量。
